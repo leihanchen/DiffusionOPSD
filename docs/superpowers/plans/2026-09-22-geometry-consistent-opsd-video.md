@@ -1323,7 +1323,7 @@ def branch_loss(y_theta, y0, y_plus, y_minus, w_eff, beta: float) -> torch.Tenso
 #!/usr/bin/env python3
 """DiffusionOPSD for Wan 2.1 with the geometry reward (spec Sec. 5.2). Single-node; policy on cuda:0, rewards on cuda:1."""
 from __future__ import annotations
-import copy, json, os, random
+import copy, hashlib, json, os, random
 from absl import app, flags
 from ml_collections import config_flags
 import torch
@@ -1344,6 +1344,11 @@ config_flags.DEFINE_config_file("config", "config/wan_video.py")
 
 def _latent_shape(pipe, cfg):
     return (1, pipe.transformer.config.in_channels, (cfg.video.num_frames - 1) // 4 + 1, cfg.video.height // 8, cfg.video.width // 8)
+
+def _prompt_seed(prompt: str) -> int:
+    """Deterministic per-prompt seed (Python hash() is salted per process)."""
+    return int(hashlib.sha256(prompt.encode()).hexdigest()[:8], 16)
+
 
 
 def main(_):
@@ -1366,7 +1371,7 @@ def main(_):
     with torch.no_grad():
         for prompt in random.Random(0).sample(prompts, min(cfg.gates.calib_prompts, len(prompts))):
             pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev)[:2]
-            g = torch.Generator(dev).manual_seed(abs(hash(prompt)) % 2**31)
+            g = torch.Generator(dev).manual_seed(_prompt_seed(prompt))
             rec = roll_old.rollout(pe, ne, torch.randn(_latent_shape(pipe, cfg), device=dev, dtype=torch.bfloat16, generator=g), cfg.opa.query_sigma)
             clip = roll_old.decode01(rec.x0); refs[prompt] = clip[0].cpu()
             out = reward(clip.to(cfg.reward_device)); s_ids.append(out.s_id.cpu()); motions.append(out.motion.cpu())
@@ -1383,7 +1388,7 @@ def main(_):
             pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev)[:2]
             if prompt not in refs:
                 with torch.no_grad():
-                    g = torch.Generator(dev).manual_seed(abs(hash(prompt)) % 2**31)
+                    g = torch.Generator(dev).manual_seed(_prompt_seed(prompt))
                     refs[prompt] = roll_old.decode01(roll_old.rollout(pe, ne, torch.randn(_latent_shape(pipe, cfg), device=dev, dtype=torch.bfloat16, generator=g), cfg.opa.query_sigma).x0)[0].cpu()
             for _ in range(K):
                 rec = roll_old.rollout(pe, ne, torch.randn(_latent_shape(pipe, cfg), device=dev, dtype=torch.bfloat16), cfg.opa.query_sigma)
