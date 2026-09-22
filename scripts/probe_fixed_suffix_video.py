@@ -28,14 +28,25 @@ def main():
     cfg = get_config()
     dev = "cuda:0"
     pipe = WanPipeline.from_pretrained(os.path.expandvars(cfg.pretrained.model), torch_dtype=torch.bfloat16).to(dev)
+    # fp32 master weights for the trained transformer (a bf16 AdamW step at lr=1e-4 underflows); VAE stays bf16.
+    pipe.transformer.to(torch.float32)
+    pipe.vae.requires_grad_(False)
+    pipe.text_encoder.requires_grad_(False)
     roll = WanRollout(pipe, cfg.sample.num_steps, cfg.sample.guidance_scale)
     reward = GeoReward(
         load_depth_anything3(cfg.reward_device), load_waft(cfg.reward_device), load_dinov2(cfg.reward_device)
     )
-    R = lambda lat: reward(roll.decode01(lat).to(cfg.reward_device)).geo.to(lat.device)
+    reward.requires_grad_(False)
+
+    def R(lat):
+        return reward(roll.decode01(lat).to(cfg.reward_device)).geo.to(lat.device)
+
     base_state = copy.deepcopy(pipe.transformer.state_dict())
-    prompts = [l.strip() for l in open(a.prompts) if l.strip()][: a.n]
+    # g_suffix backprops through the whole fixed-suffix continuation; checkpointing keeps that graph in memory.
+    pipe.transformer.enable_gradient_checkpointing()
+    prompts = [line.strip() for line in open(a.prompts) if line.strip()][: a.n]
     recs = []
+    out = open(a.out, "w")
     for prompt in prompts:
         pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev)[:2]
         shape = (
@@ -45,13 +56,20 @@ def main():
             cfg.video.height // 8,
             cfg.video.width // 8,
         )
-        z_T = torch.randn(shape, device=dev, dtype=torch.bfloat16)
-        rec = roll.rollout(pe, ne, z_T, cfg.opa.query_sigma)
+        z_T = torch.randn(shape, device=dev, dtype=torch.float32)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            rec = roll.rollout(pe, ne, z_T, cfg.opa.query_sigma)
         y0 = clean_output(rec.z_q, rec.v_old_q, torch.tensor([rec.sigma_q], device=dev)).float()
-        Fq = lambda y: R(roll.continue_from(rec.z_q, rec.q_index, y.to(rec.z_q.dtype), pe, ne))
+
+        def Fq(y):
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                x0 = roll.continue_from(rec.z_q, rec.q_index, y.to(rec.z_q.dtype), pe, ne)
+            return R(x0)
+
         # construction
         y_plus = opa_tr_step_nd(y0, R, cfg.opa.rho, cfg.opa.n_ascent, cfg.opa.eta, +1.0)
-        F0, Fplus = float(Fq(y0)), float(Fq(y_plus))
+        with torch.no_grad():
+            F0, Fplus = float(Fq(y0)), float(Fq(y_plus))
         yg = y0.clone().requires_grad_(True)
         (g_local,) = torch.autograd.grad(R(yg).sum(), yg)
         yf = y0.clone().requires_grad_(True)
@@ -60,14 +78,16 @@ def main():
         # one fresh fitting update on a copy of the policy (positive branch only, paper Sec. 4.5 protocol)
         pipe.transformer.load_state_dict(base_state)
         opt = torch.optim.AdamW(pipe.transformer.parameters(), lr=a.lr)
-        v_theta = roll.velocity(rec.z_q, torch.tensor(rec.sigma_q, device=dev), pe, ne)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            v_theta = roll.velocity(rec.z_q, torch.tensor(rec.sigma_q, device=dev), pe, ne)
         y_theta = clean_output(rec.z_q, v_theta, torch.tensor([rec.sigma_q], device=dev)).float()
         wf = (y_theta - y_plus).abs().mean().clamp(min=1e-5).detach()
         (((y_theta - y_plus) ** 2) / wf).mean().backward()
         opt.step()
         opt.zero_grad()
         with torch.no_grad():
-            v_after = roll.velocity(rec.z_q, torch.tensor(rec.sigma_q, device=dev), pe, ne)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                v_after = roll.velocity(rec.z_q, torch.tensor(rec.sigma_q, device=dev), pe, ne)
             y_after = clean_output(rec.z_q, v_after, torch.tensor([rec.sigma_q], device=dev)).float()
             Fafter = float(Fq(y_after))
         pipe.transformer.load_state_dict(base_state)
@@ -80,8 +100,9 @@ def main():
         }
         recs.append(r)
         print(json.dumps(r))
-        with open(a.out, "a") as f:
-            f.write(json.dumps(r) + "\n")
+        out.write(json.dumps(r) + "\n")
+        out.flush()
+    out.close()
     print(json.dumps(probe_summary(recs), indent=2))
 
 

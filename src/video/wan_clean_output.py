@@ -55,8 +55,8 @@ class WanRollout:
             z = z + (sig[j + 1] - sig[j]) * v  # Euler step on the rectified path
         return RolloutRecord(z, z_q, float(sig[q]), q, v_old_q, sig)
 
-    @torch.no_grad()
     def continue_from(self, z_q, q_index, forced_y, prompt_embeds, negative_embeds):
+        """Differentiable w.r.t. forced_y; wrap in torch.no_grad() when gradients are not needed."""
         sig = self._sigmas(z_q.device)
         v = (z_q - forced_y) / sig[q_index]
         z = z_q + (sig[q_index + 1] - sig[q_index]) * v
