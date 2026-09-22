@@ -13,7 +13,7 @@ echo "WAFT"
 hf download princeton-vl/WAFT waft_tar_c_t.pth --local-dir "$TARGET"
 
 echo "DINOv2 (torch.hub cache warm-up)"
-python -c "import torch; torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')"
+TORCH_HOME="$TARGET" python -c "import torch, os; torch.hub.set_dir(os.path.join('$TARGET','torch_hub')); torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')"
 
 echo "Qwen2.5-VL-7B-Instruct"
 hf download Qwen/Qwen2.5-VL-7B-Instruct --local-dir "$TARGET/Qwen2.5-VL-7B-Instruct"

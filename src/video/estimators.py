@@ -52,6 +52,8 @@ class DinoV2Patches(torch.nn.Module):
     def forward(self, imgs: torch.Tensor) -> torch.Tensor:
         B, _, H, W = imgs.shape
         h, w = H // self.patch, W // self.patch
+        if h == 0 or w == 0:
+            raise ValueError(f"input {H}x{W} smaller than one {self.patch}px patch")
         x = F.interpolate(imgs, size=(h * self.patch, w * self.patch), mode="bilinear", align_corners=False)
         x = (x - _IMNET_MEAN.to(x)) / _IMNET_STD.to(x)
         tok = self.backbone.forward_features(x)["x_norm_patchtokens"]  # [B,h*w,D]
@@ -60,6 +62,7 @@ class DinoV2Patches(torch.nn.Module):
 
 
 def load_dinov2(device) -> PatchFeatureExtractor:
+    torch.hub.set_dir(os.path.join(_ckpt_root(), "torch_hub"))
     backbone = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14").to(device)
     return DinoV2Patches(backbone).to(device)
 
@@ -87,8 +90,13 @@ def load_waft(device) -> FlowEstimator:
     with open(os.path.join(root, "config", "eval", "sintel.json")) as f:
         cfg = json.load(f)
     model = WAFT(cfg)
-    sd = torch.load(os.path.join(_ckpt_root(), "waft_tar_c_t.pth"), map_location="cpu")
-    model.load_state_dict(sd, strict=False)
+    sd = torch.load(os.path.join(_ckpt_root(), "waft_tar_c_t.pth"), map_location="cpu", weights_only=True)
+    if isinstance(sd, dict):
+        sd = sd.get("model", sd)
+    sd = {(k[len("module."):] if k.startswith("module.") else k): v for k, v in sd.items()}
+    result = model.load_state_dict(sd, strict=False)
+    if result.missing_keys:
+        raise RuntimeError(f"WAFT checkpoint is missing {len(result.missing_keys)} keys: {result.missing_keys[:5]}...")
     return WaftFlow(model).to(device)
 
 
@@ -101,11 +109,19 @@ class DepthAnything3(torch.nn.Module):
 
     def forward(self, frames01: torch.Tensor) -> DepthOutput:
         B, T, _, H, W = frames01.shape
-        pred = self.model.inference(frames01.reshape(B * T, 3, H, W), batch_size=T)
-        depth = pred["depth"].reshape(B, T, H, W)
-        conf = pred["conf"].reshape(B, T, H, W).clamp(0, 1)
-        K = pred["intrinsics"].reshape(B, T, 3, 3)[:, 0]
-        poses = pred["extrinsics_c2w"].reshape(B, T, 4, 4)
+        # Run DA3 per clip so unrelated videos in a batch never share a scene frame.
+        # Key names (depth, conf, intrinsics, extrinsics_c2w) are verified by scripts/check_video_reward_setup.py.
+        depths, confs, Ks, poses_list = [], [], [], []
+        for b in range(B):
+            pred = self.model.inference(frames01[b], batch_size=T)  # input [T,3,H,W]
+            depths.append(pred["depth"].reshape(T, H, W))
+            confs.append(pred["conf"].reshape(T, H, W).clamp(0, 1))
+            Ks.append(pred["intrinsics"].reshape(T, 3, 3)[0])
+            poses_list.append(pred["extrinsics_c2w"].reshape(T, 4, 4))
+        depth = torch.stack(depths, dim=0)
+        conf = torch.stack(confs, dim=0)
+        K = torch.stack(Ks, dim=0)
+        poses = torch.stack(poses_list, dim=0)
         return DepthOutput(depth.float(), K.float(), poses.float(), conf.float())
 
 
