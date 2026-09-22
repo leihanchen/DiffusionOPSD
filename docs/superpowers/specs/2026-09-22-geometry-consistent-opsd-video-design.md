@@ -40,7 +40,7 @@ reward must see several frames at once to say anything about consistency.
 | Which error dominates the target gradient? | Geometry. Temporal identity acts as a gate, not a gradient. |
 | What counts as success? | Automatic metrics on a held-out prompt set: geometry up, temporal identity above a floor, standard video quality within an agreed margin. |
 | Reward source | GeoFlow-style depth + flow reprojection score ([arXiv 2605.18365](https://www.alphaxiv.org/abs/2605.18365)), not a 4D-reconstruction critic and not a VLM judge. |
-| Role of a VLM judge | Quality guard only: open VLM pairwise win-probability used as a hard mask on \(\omega\) and as a held-out success criterion. Not a gradient source. |
+| Role of a quality judge | Quality guard only: VideoReward (VQ and MQ versus the fixed base-model clip) used as a hard mask on \(\omega\) and as a held-out success criterion. Not a gradient source. |
 
 ## 4. Reward design
 
@@ -88,13 +88,22 @@ The prompt set (Sec. 5.3) is also restricted to prompts that call for camera or 
 ### 4.4 Quality mask
 
 For each prompt, generate one reference clip with the frozen base model at the same seed
-before training starts and keep it fixed (mirrors the paper's fixed-reference VLM-Pairwise
-protocol, with the base model in place of Seedream 5.0 Pro). At each outer iteration, an open
-video-capable VLM (default Qwen2.5-VL-7B, prompted for pairwise preference on overall
-quality) returns \(p_q = P(\text{rollout} \succ \text{reference})\) for the decoded endpoint.
-If \(p_q < \tau_q\), set \(\omega = 0\). This is a hard, asymmetric use of \(\omega\) by design,
-because the soft weight alone has little effect (Sec. 2). The VLM is never differentiated and
-runs only once per rollout endpoint.
+before training starts and keep it fixed. At each outer iteration, VideoReward
+([KwaiVGI/VideoReward](https://huggingface.co/KwaiVGI/VideoReward), the Qwen2-VL-2B reward
+from KlingTeam) scores the decoded endpoint and that reference. The quality signal is the
+worse of the two normalized gaps, visual quality and motion quality:
+
+\[
+p_q = \sigma\big(\min(\mathrm{VQ}_{roll}-\mathrm{VQ}_{ref},\; \mathrm{MQ}_{roll}-\mathrm{MQ}_{ref})\big).
+\]
+
+Equal clips give \(p_q = 0.5\). Scores are the checkpoint's z-normalized logits, so
+\(\tau_q = 0.4\) is about a 0.4 standard-deviation drop on the worse of VQ and MQ. If
+\(p_q < \tau_q\), set \(\omega = 0\). Text alignment is
+recorded and not used in the mask. This is a hard, asymmetric use of \(\omega\) by design,
+because the soft weight alone has little effect (Sec. 2). VideoReward is never differentiated
+and runs only once per rollout endpoint. The loader is the VideoAlign repository; weights are
+not in this demo bundle.
 
 ### 4.5 Effective fitting weight
 
@@ -113,8 +122,9 @@ else in the loss changes.
   Default: Wan 2.1 T2V-1.3B. This is an assumption to confirm at plan time; any rectified-flow
   video model with the \(y = z - \sigma v\) clean-output map works.
 - Frozen reward assets to download: Depth Anything 3 Large v1.1, WAFT, DINOv2-base,
-  Qwen2.5-VL-7B. None of these, and no video model weights, are in this project's bundled
-  evidence; they must be downloaded before any run.
+  and VideoReward (`KwaiVGI/VideoReward` plus the VideoAlign loader). None of these, and no
+  video model weights, are in this project's bundled evidence; they must be downloaded before
+  any run.
 
 ### 5.2 Algorithm (deltas from paper Algorithm 1)
 
@@ -164,7 +174,7 @@ Compared with the frozen base model on the same prompts and seeds:
 |---|---|---|
 | Geometry up | mean \(R_{geo}\); additionally the 3D/camera-consistency dimensions of WorldScore and VBench-2.0 | \(R_{geo}\) improves; external dimensions do not regress |
 | Identity above floor | mean \(s_{id}\) | \(\ge\) base-model mean minus 0.02 |
-| Quality within margin | VLM pairwise \(p_q\) vs base; VBench imaging-quality and aesthetic-quality | \(p_q \ge 0.45\); VBench dimensions within 2% relative of base |
+| Quality within margin | VideoReward \(p_q\) vs base (worse of VQ and MQ); VBench imaging-quality and aesthetic-quality | \(p_q \ge 0.45\); VBench dimensions within 2% relative of base |
 | Not frozen | mean motion \(m\) | \(\ge 0.9\times\) base-model mean |
 
 Thresholds \(\tau_{id}, \tau_{motion}, \tau_q\) for training are set from base-model
@@ -187,7 +197,7 @@ statistics on the training prompts before the first outer iteration: \(\tau_{id}
 
 1. Reward module: differentiable \(R_{geo}\), \(s_{id}\), \(m\) on decoded clips; frozen
    Depth Anything 3 / WAFT / DINOv2-base wrappers.
-2. Quality service: fixed reference clips per prompt, VLM pairwise scorer returning \(p_q\).
+2. Quality service: fixed reference clips per prompt, VideoReward scorer returning \(p_q\).
 3. OPSD video loop: clean-output map for the chosen video model, query selection, target
    construction, \(\omega_{eff}\), branch loss, EMA.
 4. Fixed-suffix probe script and report (Sec. 6).

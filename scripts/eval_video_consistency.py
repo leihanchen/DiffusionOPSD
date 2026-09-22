@@ -20,7 +20,7 @@ from config.wan_video import get_config
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
 from diffusionopsd.video.eval_table import success_table
 from diffusionopsd.video.geo_reward import GeoReward
-from diffusionopsd.video.quality_judge import load_qwen25_vl
+from diffusionopsd.video.quality_judge import load_video_reward
 from diffusionopsd.video.wan_clean_output import WanRollout
 
 
@@ -66,7 +66,7 @@ def main():
     )
     pipe.vae.requires_grad_(False)
     reward.requires_grad_(False)
-    judge = load_qwen25_vl(cfg.judge.device)
+    judge = load_video_reward(cfg.judge.device, num_frames=cfg.judge.num_frames)
     prompt_path = a.prompts or cfg.eval_prompts
     with open(prompt_path) as f:
         prompts = [line.strip() for line in f if line.strip()]

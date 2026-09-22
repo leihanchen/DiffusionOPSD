@@ -2,13 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Extend the DiffusionOPSD codebase so a rectified-flow text-to-video model (default Wan 2.1 T2V-1.3B) can be post-trained with a differentiable GeoFlow-style geometry reward as the local and endpoint reward, an identity gate, a motion floor, and a VLM pairwise quality mask, with a fixed-suffix probe that must pass before training.
+**Goal:** Extend the DiffusionOPSD codebase so a rectified-flow text-to-video model (default Wan 2.1 T2V-1.3B) can be post-trained with a differentiable GeoFlow-style geometry reward as the local and endpoint reward, an identity gate, a motion floor, and a VideoReward quality mask, with a fixed-suffix probe that must pass before training.
 
 **Architecture:** All new code lives in a new `src/video/` package (`diffusionopsd.video`) and three new scripts; nothing in the existing SD3.5-M / Z-Image trainers is modified. The video reward is a plain `torch.nn.Module` over decoded frames `[B,T,3,H,W]` in `[0,1]`, built from three frozen estimators behind small adapter protocols so they can be mocked in tests. The trust-region target step from `scripts/train_opsd_ri_sd3.py::_opa_tr_step` is re-implemented once in N-D form and shared by the probe and the trainer.
 
-**Tech Stack:** Python ≥3.10, torch ≥2.6, diffusers ≥0.36 (`WanPipeline`, `AutoencoderKLWan`), transformers 4.51.x (repo pin), Depth Anything 3 Large v1.1, WAFT, DINOv2-base (`torch.hub facebookresearch/dinov2 dinov2_vitb14`), Qwen2.5-VL-7B-Instruct, pytest.
+**Tech Stack:** Python ≥3.10, torch ≥2.6, diffusers ≥0.36 (`WanPipeline`, `AutoencoderKLWan`), transformers 4.51.x (repo pin), Depth Anything 3 Large v1.1, WAFT, DINOv2-base (`torch.hub facebookresearch/dinov2 dinov2_vitb14`), VideoReward (`KwaiVGI/VideoReward` via `KwaiVGI/VideoAlign`), pytest.
 
 Spec: `docs/superpowers/specs/2026-09-22-geometry-consistent-opsd-video-design.md`.
+
+**Quality-judge update:** the shipped mask is VideoReward, not Qwen2.5-VL. `p_q = sigmoid(min(ΔVQ, ΔMQ))` against the fixed base-model clip. Task 6 below is the earlier pairwise-VLM sketch; `src/video/quality_judge.py` supersedes it.
 
 ## Global Constraints
 
@@ -34,13 +36,13 @@ Spec: `docs/superpowers/specs/2026-09-22-geometry-consistent-opsd-video-design.m
 | `src/video/opa_video.py` | N-D trust-region ascent/descent step (`opa_tr_step_nd`) |
 | `src/video/estimators.py` | adapter protocols + loaders for Depth Anything 3, WAFT, DINOv2 |
 | `src/video/geo_reward.py` | `GeoReward` module: composes estimators into `R_geo`, `s_id`, `m` |
-| `src/video/quality_judge.py` | `PairwiseVLMJudge` (Qwen2.5-VL) returning `p_q` |
+| `src/video/quality_judge.py` | `VideoRewardJudge` (VideoReward VQ/MQ gap) returning `p_q` |
 | `src/video/wan_clean_output.py` | Wan 2.1 rollout with query capture, clean-output map, decode |
 | `src/video/probe_stats.py` | aggregate fixed-suffix probe records into pass/fail |
 | `src/video/branch_loss.py` | paper Eq. 11–13 with the masked weight |
 | `src/video/eval_table.py` | spec Sec. 7 success table |
 | `config/wan_video.py` | ml_collections config for the video trainer |
-| `scripts/download_video_reward_weights.sh` | fetch DA3, WAFT, DINOv2, Qwen2.5-VL, Wan 2.1 |
+| `scripts/download_video_reward_weights.sh` | fetch DA3, WAFT, DINOv2, VideoReward, Wan 2.1 |
 | `scripts/check_video_reward_setup.py` | one-clip smoke: finite `R_geo` and finite latent gradient |
 | `scripts/probe_fixed_suffix_video.py` | Sec. 6 go/no-go probe |
 | `scripts/train_opsd_video_wan.py` | training loop |
@@ -825,6 +827,8 @@ Expected: one JSON line with finite `geo` and `frame_grad_norm > 0`. If a vendor
 ---
 
 ### Task 6: Pairwise VLM quality judge
+
+> Superseded. The code uses VideoReward (`load_video_reward`) and `p_q = sigmoid(min(ΔVQ, ΔMQ))`. The steps below are the original Qwen2.5-VL sketch.
 
 **Files:**
 - Create: `src/video/quality_judge.py`

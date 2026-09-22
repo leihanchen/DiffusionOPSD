@@ -1,71 +1,112 @@
-"""Pairwise VLM quality judge used only as a hard mask on omega and as a held-out metric (spec Sec. 4.4)."""
+"""VideoReward quality judge used only as a hard mask on omega and as a held-out metric.
+
+The score is KlingTeam VideoReward (KwaiVGI/VideoReward): a Qwen2-VL-2B reward with three
+logits, visual quality (VQ), motion quality (MQ), and text alignment (TA). The mask uses VQ
+and MQ. The model is never differentiated.
+"""
 
 from __future__ import annotations
 
 import os
+import sys
 
 import torch
 
-JUDGE_PROMPT = (
-    "You are shown two short video clips, A then B, both generated for the prompt: \"{prompt}\". "
-    "Judge overall quality: visual fidelity, temporal smoothness, absence of artifacts, and how well the clip "
-    "matches the prompt. Answer with a single letter, A or B, for the better clip."
-)
+
+def quality_gap(rollout: dict, reference: dict) -> float:
+    """Worse of the visual-quality and motion-quality gaps, rollout minus reference."""
+    return min(rollout["VQ"] - reference["VQ"], rollout["MQ"] - reference["MQ"])
 
 
-class PairwiseVLMJudge:
-    def __init__(self, model, processor, device, num_frames: int = 8):
-        # `device` is accepted for interface compatibility; placement is handled by the model adapter.
-        self.model, self.processor, self.num_frames = model, processor, num_frames
-        tok = processor.tokenizer
-        self.id_a, self.id_b = tok.convert_tokens_to_ids("A"), tok.convert_tokens_to_ids("B")
+def gap_to_probability(gap: float) -> float:
+    """Map a normalized score gap to (0, 1). Equal clips return 0.5, above tau_q=0.4."""
+    return float(torch.sigmoid(torch.tensor(float(gap))))
+
+
+class VideoRewardJudge:
+    """`scorer(clip[T,3,H,W] in [0,1], prompt) -> {VQ, MQ, TA, Overall}`."""
+
+    def __init__(self, scorer, num_frames: int = 8):
+        self.scorer = scorer
+        self.num_frames = num_frames
 
     def _subsample(self, clip: torch.Tensor) -> torch.Tensor:
         idx = torch.linspace(0, clip.shape[0] - 1, self.num_frames).round().long()
         return clip[idx]
 
     @torch.no_grad()
-    def _p_first(self, first, second, prompt) -> float:
-        inputs = self.processor.build(
-            self._subsample(first), self._subsample(second), JUDGE_PROMPT.format(prompt=prompt)
+    def score(self, clip: torch.Tensor, prompt: str) -> dict:
+        return self.scorer(self._subsample(clip), prompt)
+
+    def p_win(self, clip_a: torch.Tensor, clip_b: torch.Tensor, prompt: str) -> float:
+        """Probability-shaped score that clip_a is at least as good as clip_b on VQ and MQ."""
+        return gap_to_probability(quality_gap(self.score(clip_a, prompt), self.score(clip_b, prompt)))
+
+
+def _to_pil(clip: torch.Tensor) -> list:
+    """clip [T,3,H,W] float [0,1] -> RGB PIL frames. VideoAlign accepts a list of images as a video."""
+    from PIL import Image
+
+    frames = (clip.detach().clamp(0, 1) * 255).round().to(torch.uint8).cpu()
+    images = []
+    for t in range(frames.shape[0]):
+        images.append(Image.fromarray(frames[t].permute(1, 2, 0).numpy(), mode="RGB"))
+    return images
+
+
+class _VideoAlignScorer:
+    """Calls the official VideoVLMRewardInference forward on in-memory frames."""
+
+    def __init__(self, inferencer):
+        self.inferencer = inferencer
+
+    def __call__(self, clip: torch.Tensor, prompt: str) -> dict:
+        from prompt_template import build_prompt
+        from vision_process import process_vision_info
+
+        inf = self.inferencer
+        cfg = inf.data_config
+        text = build_prompt(prompt, cfg.eval_dim, cfg.prompt_template_type)
+        video = {
+            "type": "video",
+            "video": _to_pil(clip),
+            "max_pixels": cfg.max_frame_pixels,
+            "sample_type": cfg.sample_type,
+        }
+        # Match VideoAlign.prepare_batch: fps when the checkpoint leaves num_frames unset.
+        if cfg.num_frames is None:
+            video["fps"] = cfg.fps
+        else:
+            video["nframes"] = cfg.num_frames
+        chat = [[{"role": "user", "content": [video, {"type": "text", "text": text}]}]]
+        image_inputs, video_inputs = process_vision_info(chat)
+        batch = inf.processor(
+            text=inf.processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True),
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+            videos_kwargs={"do_rescale": True},
         )
-        logits = self.model.next_token_logits(inputs)
-        two = torch.stack([logits[self.id_a], logits[self.id_b]]).float()
-        return float(torch.softmax(two, 0)[0])
-
-    def p_win(self, clip_a, clip_b, prompt) -> float:
-        return 0.5 * (self._p_first(clip_a, clip_b, prompt) + (1.0 - self._p_first(clip_b, clip_a, prompt)))
-
-
-def _to_uint8(frames: torch.Tensor) -> torch.Tensor:
-    """Float [0,1] frames -> uint8 [0,255]; the Qwen processor rescales by 1/255 itself."""
-    return (frames.clamp(0, 1) * 255).round().to(torch.uint8)
+        batch = inf._prepare_inputs(batch)
+        logits = inf.model(return_dict=True, **batch)["logits"]
+        row = logits[0]
+        reward = {"VQ": float(row[0]), "MQ": float(row[1]), "TA": float(row[2])}
+        reward = inf._norm(reward)
+        reward["Overall"] = reward["VQ"] + reward["MQ"] + reward["TA"]
+        return reward
 
 
-class _QwenProcessorAdapter:
-    def __init__(self, processor):
-        self.processor, self.tokenizer = processor, processor.tokenizer
+def load_video_reward(device, num_frames: int = 8) -> VideoRewardJudge:
+    """Load KwaiVGI/VideoReward via the VideoAlign repo cloned under VIDEO_REWARD_CKPT_PATH."""
+    root = os.environ["VIDEO_REWARD_CKPT_PATH"]
+    repo = os.path.join(root, "VideoAlign")
+    ckpt = os.path.join(root, "VideoReward")
+    if repo not in sys.path:
+        sys.path.insert(0, repo)
+    from inference import VideoVLMRewardInference
 
-    def build(self, frames_a, frames_b, text):
-        # The chat template only reads `type`; the actual frames are passed via `videos=`.
-        msgs = [{"role": "user", "content": [{"type": "video"}, {"type": "video"}, {"type": "text", "text": text}]}]
-        chat = self.processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
-        return self.processor(text=[chat], videos=[_to_uint8(frames_a), _to_uint8(frames_b)], return_tensors="pt")
-
-
-class _QwenModelAdapter:
-    def __init__(self, model, device):
-        self.model, self.device = model, device
-
-    def next_token_logits(self, inputs):
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        return self.model(**inputs, logits_to_keep=1).logits[0, -1]
-
-
-def load_qwen25_vl(device) -> PairwiseVLMJudge:
-    from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
-    path = os.path.join(os.environ["VIDEO_REWARD_CKPT_PATH"], "Qwen2.5-VL-7B-Instruct")
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(path, torch_dtype=torch.bfloat16).to(device).eval()
-    model.requires_grad_(False)
-    proc = AutoProcessor.from_pretrained(path)
-    return PairwiseVLMJudge(_QwenModelAdapter(model, device), _QwenProcessorAdapter(proc), device)
+    inferencer = VideoVLMRewardInference(ckpt, device=device, dtype=torch.bfloat16)
+    inferencer.model.requires_grad_(False)
+    inferencer.model.eval()
+    return VideoRewardJudge(_VideoAlignScorer(inferencer), num_frames=num_frames)

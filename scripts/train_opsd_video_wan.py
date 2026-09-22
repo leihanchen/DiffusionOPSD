@@ -30,7 +30,7 @@ from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, lo
 from diffusionopsd.video.gates import effective_weight, identity_keep, percentile_threshold
 from diffusionopsd.video.geo_reward import GeoReward
 from diffusionopsd.video.opa_video import opa_tr_step_nd
-from diffusionopsd.video.quality_judge import load_qwen25_vl
+from diffusionopsd.video.quality_judge import load_video_reward
 from diffusionopsd.video.wan_clean_output import WanRollout, clean_output
 
 FLAGS = flags.FLAGS
@@ -69,7 +69,7 @@ def main(_):
         load_dinov2(cfg.reward_device),
     )
     reward.requires_grad_(False)
-    judge = load_qwen25_vl(cfg.judge.device)
+    judge = load_video_reward(cfg.judge.device, num_frames=cfg.judge.num_frames)
 
     def R_geo(lat):
         return reward(roll_old.decode01(lat).to(cfg.reward_device)).geo.to(lat.device)

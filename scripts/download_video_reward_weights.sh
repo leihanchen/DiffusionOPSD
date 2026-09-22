@@ -15,8 +15,11 @@ hf download princeton-vl/WAFT waft_tar_c_t.pth --local-dir "$TARGET"
 echo "DINOv2 (torch.hub cache warm-up)"
 TORCH_HOME="$TARGET" python -c "import torch, os; torch.hub.set_dir(os.path.join('$TARGET','torch_hub')); torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')"
 
-echo "Qwen2.5-VL-7B-Instruct"
-hf download Qwen/Qwen2.5-VL-7B-Instruct --local-dir "$TARGET/Qwen2.5-VL-7B-Instruct"
+echo "VideoReward (KwaiVGI) and the VideoAlign loader"
+# model_config.json and checkpoint-*/model.pth must stay in $TARGET/VideoReward (the loader reads that directory).
+[ -d "$TARGET/VideoAlign" ] || git clone -q --depth 1 https://github.com/KwaiVGI/VideoAlign.git "$TARGET/VideoAlign"
+hf download KwaiVGI/VideoReward --local-dir "$TARGET/VideoReward"
+pip install -q peft pandas 'qwen-vl-utils>=0.0.8'
 
 echo "Wan 2.1 T2V-1.3B (diffusers layout)"
 hf download Wan-AI/Wan2.1-T2V-1.3B-Diffusers --local-dir "$TARGET/Wan2.1-T2V-1.3B-Diffusers"
