@@ -19,7 +19,10 @@ def rigid_flow(depth: torch.Tensor, K: torch.Tensor, T_rel: torch.Tensor) -> tor
 
     depth: [B,H,W] metric depth of frame t.  K: [B,3,3].  T_rel: [B,4,4], frame-t camera -> frame-(t+1) camera.
     Returns flow [B,2,H,W] in pixels (u' - u, v' - v).
+    Inputs must be float32 or float64 (torch.linalg.solve does not support half precision).
     """
+    K = K.to(depth.dtype)
+    T_rel = T_rel.to(depth.dtype)
     B, H, W = depth.shape
     grid = pixel_grid(H, W, depth.device, depth.dtype).reshape(1, 3, -1).expand(B, 3, -1)  # [B,3,N]
     rays = torch.linalg.solve(K, grid)  # K^-1 [u,v,1]
@@ -36,4 +39,5 @@ def reprojection_residual(flow: torch.Tensor, rigid: torch.Tensor, conf: torch.T
     """Confidence-weighted mean L1 residual between observed and rigid flow, per sample -> [B]."""
     l1 = (flow - rigid).abs().sum(dim=1)  # [B,H,W]
     w = conf.clamp(min=0.0)
-    return (w * l1).flatten(1).sum(1) / (w.flatten(1).sum(1) + 1e-8) * (w.flatten(1).sum(1) > 0)
+    wsum = w.flatten(1).sum(1)
+    return (w * l1).flatten(1).sum(1) / (wsum + 1e-8) * (wsum > 0)
