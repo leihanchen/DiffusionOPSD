@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
-"""DiffusionOPSD for Wan 2.1 with the geometry reward (spec Sec. 5.2). Single-node; policy on cuda:0, rewards on cuda:1."""
+"""DiffusionOPSD for Wan 2.1 with the geometry reward (spec Sec. 5.2).
+
+Single-node: policy on cuda:0, rewards on cuda:1.
+"""
 from __future__ import annotations
 
 import copy
 import hashlib
 import json
 import os
+from pathlib import Path
 import random
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+for path in (ROOT / "src", ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from absl import app, flags
 from diffusers import WanPipeline

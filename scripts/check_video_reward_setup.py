@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
 """Load the real estimators, score one synthetic clip, and verify a finite frame-space gradient."""
 from __future__ import annotations
+
 import argparse
 import json
 import math
+from pathlib import Path
+import sys
 import time
+
 import torch
+
+ROOT = Path(__file__).resolve().parents[1]
+for path in (ROOT / "src", ROOT):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
 from diffusionopsd.video.geo_reward import GeoReward
 
