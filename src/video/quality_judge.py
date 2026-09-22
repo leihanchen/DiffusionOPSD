@@ -15,7 +15,8 @@ JUDGE_PROMPT = (
 
 class PairwiseVLMJudge:
     def __init__(self, model, processor, device, num_frames: int = 8):
-        self.model, self.processor, self.device, self.num_frames = model, processor, device, num_frames
+        # `device` is accepted for interface compatibility; placement is handled by the model adapter.
+        self.model, self.processor, self.num_frames = model, processor, num_frames
         tok = processor.tokenizer
         self.id_a, self.id_b = tok.convert_tokens_to_ids("A"), tok.convert_tokens_to_ids("B")
 
@@ -25,7 +26,9 @@ class PairwiseVLMJudge:
 
     @torch.no_grad()
     def _p_first(self, first, second, prompt) -> float:
-        inputs = self.processor.build(self._subsample(first), self._subsample(second), JUDGE_PROMPT.format(prompt=prompt))
+        inputs = self.processor.build(
+            self._subsample(first), self._subsample(second), JUDGE_PROMPT.format(prompt=prompt)
+        )
         logits = self.model.next_token_logits(inputs)
         two = torch.stack([logits[self.id_a], logits[self.id_b]]).float()
         return float(torch.softmax(two, 0)[0])
@@ -34,16 +37,20 @@ class PairwiseVLMJudge:
         return 0.5 * (self._p_first(clip_a, clip_b, prompt) + (1.0 - self._p_first(clip_b, clip_a, prompt)))
 
 
+def _to_uint8(frames: torch.Tensor) -> torch.Tensor:
+    """Float [0,1] frames -> uint8 [0,255]; the Qwen processor rescales by 1/255 itself."""
+    return (frames.clamp(0, 1) * 255).round().to(torch.uint8)
+
+
 class _QwenProcessorAdapter:
     def __init__(self, processor):
         self.processor, self.tokenizer = processor, processor.tokenizer
 
     def build(self, frames_a, frames_b, text):
-        msgs = [{"role": "user", "content": [
-            {"type": "video", "video": [f for f in frames_a]}, {"type": "video", "video": [f for f in frames_b]},
-            {"type": "text", "text": text}]}]
+        # The chat template only reads `type`; the actual frames are passed via `videos=`.
+        msgs = [{"role": "user", "content": [{"type": "video"}, {"type": "video"}, {"type": "text", "text": text}]}]
         chat = self.processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
-        return self.processor(text=[chat], videos=[frames_a, frames_b], return_tensors="pt")
+        return self.processor(text=[chat], videos=[_to_uint8(frames_a), _to_uint8(frames_b)], return_tensors="pt")
 
 
 class _QwenModelAdapter:
@@ -52,7 +59,7 @@ class _QwenModelAdapter:
 
     def next_token_logits(self, inputs):
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        return self.model(**inputs).logits[0, -1]
+        return self.model(**inputs, logits_to_keep=1).logits[0, -1]
 
 
 def load_qwen25_vl(device) -> PairwiseVLMJudge:
