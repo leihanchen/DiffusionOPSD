@@ -24,4 +24,7 @@ pip install -q peft pandas 'qwen-vl-utils>=0.0.8'
 echo "Wan 2.1 T2V-1.3B (diffusers layout)"
 hf download Wan-AI/Wan2.1-T2V-1.3B-Diffusers --local-dir "$TARGET/Wan2.1-T2V-1.3B-Diffusers"
 
+echo "Wan 2.2 TI2V-5B (diffusers layout)"
+hf download Wan-AI/Wan2.2-TI2V-5B-Diffusers --local-dir "$TARGET/Wan2.2-TI2V-5B-Diffusers"
+
 echo "export VIDEO_REWARD_CKPT_PATH='$TARGET'"

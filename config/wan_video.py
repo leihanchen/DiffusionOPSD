@@ -37,4 +37,5 @@ def get_config():
     config.prompt_fn = "text_file"
     config.prompt_fn_kwargs = {"path": "data/video_motion/train.txt"}
     config.eval_prompts = "data/video_motion/test.txt"
+    config.use_lora = False
     return config
