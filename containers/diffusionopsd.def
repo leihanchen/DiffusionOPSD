@@ -1,0 +1,201 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.14.0-cuda13.0-cudnn9-devel
+
+# DiffusionOPSD environment for a Compute Canada / Alliance compute node whose
+# NVIDIA driver reports CUDA 13.0. A 13.0 driver can run this image. It cannot
+# run a CUDA 13.2 image, so this definition stays on the 13.0 tag (toolkit 13.0.3).
+#
+# The image already contains Python 3.12, torch 2.14.0+cu130, and torchvision.
+# Later pip steps are constrained so they cannot replace that CUDA build.
+#
+# One Transformers release has to load every model this repo trains or scores:
+#   SD3.5-M                         CLIP-L/G + T5, StableDiffusion3Pipeline
+#   Z-Image-Turbo                   ZImagePipeline
+#   Wan2.1-T2V-1.3B                 WanPipeline, UMT5 encoder
+#   Wan2.2-TI2V-5B                  same pipeline, config.expand_timesteps
+#   VideoReward                     Qwen2-VL-2B (KwaiVGI/VideoAlign)
+#   HPSv3                           Qwen2-VL-7B, pre-4.57 checkpoint layout
+#   DeQA                            mPLUG-Owl2 remote code, patched for >=4.49
+#   CLIPScore, PickScore, Aesthetic, ImageReward, HPSv2.1
+#   Depth Anything 3 Large v1.1, WAFT, DINOv2-base
+# Transformers 4.51.3 is that release. 4.57 and later change the Qwen2-VL
+# state-dict layout HPSv3 was saved with. Transformers 5.x also requires
+# huggingface-hub>=1.5, and Diffusers 0.40 requires hub>=1.23, so both are
+# outside this stack. Diffusers 0.39.0 is the newest release that still accepts
+# hub 0.36 and already ships ZImagePipeline plus Wan expand_timesteps.
+#
+# Weights are not baked in. Download them on the cluster after the image exists.
+#
+# Build from the repository root (paths below are relative to that directory):
+#   module load apptainer
+#   export APPTAINER_CACHEDIR=$SCRATCH/apptainer/cache
+#   export APPTAINER_TMPDIR=$SCRATCH/apptainer/tmp
+#   mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
+#   apptainer build $SCRATCH/diffusionopsd.sif containers/diffusionopsd.def
+#
+# Run on a GPU node. Bind scratch; the image does not contain checkpoints.
+#   export HF_HOME=$SCRATCH/hf
+#   export TORCH_HOME=$SCRATCH/torch
+#   export REWARD_CKPT_PATH=$SCRATCH/reward_ckpts
+#   export VIDEO_REWARD_CKPT_PATH=$SCRATCH/video_reward_ckpts
+#   apptainer exec --nv --bind $SCRATCH \
+#     --env HF_HOME=$HF_HOME,TORCH_HOME=$TORCH_HOME \
+#     --env REWARD_CKPT_PATH=$REWARD_CKPT_PATH \
+#     --env VIDEO_REWARD_CKPT_PATH=$VIDEO_REWARD_CKPT_PATH \
+#     $SCRATCH/diffusionopsd.sif \
+#     python scripts/train_opsd_video_wan.py --config config/wan22_ti2v.py
+
+%labels
+    org.opencontainers.image.title DiffusionOPSD
+    cuda 13.0
+    torch 2.14.0
+    transformers 4.51.3
+    diffusers 0.39.0
+
+%help
+    Compute Canada image for DiffusionOPSD.
+    Host driver must support CUDA 13.0. Run with: apptainer exec --nv
+    Checkpoints stay on $SCRATCH; this image only has the software stack.
+
+%files
+    pyproject.toml /opt/DiffusionOPSD/pyproject.toml
+    README.md /opt/DiffusionOPSD/README.md
+    LICENSE /opt/DiffusionOPSD/LICENSE
+    src /opt/DiffusionOPSD/src
+    scripts /opt/DiffusionOPSD/scripts
+    config /opt/DiffusionOPSD/config
+    data /opt/DiffusionOPSD/data
+    tests /opt/DiffusionOPSD/tests
+
+%environment
+    export DIFFUSIONOPSD_ROOT=/opt/DiffusionOPSD
+    export PYTHONPATH=/opt/DiffusionOPSD
+    export PYTHONUNBUFFERED=1
+    export TOKENIZERS_PARALLELISM=false
+    export HF_HUB_DISABLE_TELEMETRY=1
+    export WANDB_MODE=offline
+    export PATH=/usr/local/cuda/bin:${PATH}
+    export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+    export CUDA_HOME=/usr/local/cuda
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        git \
+        ffmpeg \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6
+    rm -rf /var/lib/apt/lists/*
+
+    python - << 'PY'
+from pathlib import Path
+import subprocess
+frozen = subprocess.check_output(["pip", "freeze"], text=True)
+kept = []
+for line in frozen.splitlines():
+    name = line.split("==", 1)[0].replace("_", "-").lower()
+    if name in {"torch", "torchvision", "triton"}:
+        kept.append(line)
+pins = """
+transformers==4.51.3
+huggingface-hub==0.36.2
+tokenizers>=0.21,<0.22
+diffusers==0.39.0
+numpy==1.26.4
+peft==0.17.1
+accelerate==1.12.0
+datasets==3.6.0
+timm>=1.0.11,<1.1
+"""
+Path("/opt/constraints.txt").write_text("\n".join(kept) + "\n" + pins)
+print(Path("/opt/constraints.txt").read_text())
+PY
+
+    python -m pip install --upgrade pip
+    # The image's torch is torch==2.14.0+cu130. Installing the project without
+    # --no-deps would let pip replace it. Constraints plus --no-deps on the
+    # local project keep that wheel, then the explicit requirements are installed
+    # against the same constraint file.
+    python -m pip install --no-deps /opt/DiffusionOPSD
+    python -m pip install -c /opt/constraints.txt \
+        "absl-py" \
+        "accelerate==1.12.0" \
+        "datasets==3.6.0" \
+        "diffusers==0.39.0" \
+        "huggingface-hub==0.36.2" \
+        "ml-collections" \
+        "numpy==1.26.4" \
+        "pandas>=2.2" \
+        "peft==0.17.1" \
+        "pillow>=10.4" \
+        "protobuf" \
+        "scipy>=1.15" \
+        "sentencepiece" \
+        "tokenizers>=0.21,<0.22" \
+        "tqdm>=4.67" \
+        "transformers==4.51.3" \
+        "wandb>=0.18" \
+        "fairscale==0.4.13" \
+        "open-clip-torch>=2.31" \
+        "timm>=1.0.11,<1.1" \
+        "qwen-vl-utils>=0.0.8" \
+        "omegaconf" \
+        "safetensors" \
+        "einops" \
+        "fire" \
+        "trl==0.15.2" \
+        "matplotlib" \
+        "tensorboard" \
+        "icecream" \
+        "opencv-python-headless" \
+        "imageio" \
+        "e3nn" \
+        "pytest>=8.2" \
+        "ruff>=0.8"
+    # Package metadata for these two pins an older Transformers or timm.
+    # Their inference code runs on the stack above.
+    python -m pip install --no-deps "image-reward==1.5" "hpsv3==1.0.0"
+    python -m pip install --no-deps "depth-anything-3==0.1.1"
+
+    if ! command -v hf >/dev/null 2>&1; then
+        printf '%s\n' '#!/bin/sh' 'exec huggingface-cli "$@"' > /usr/local/bin/hf
+        chmod 755 /usr/local/bin/hf
+    fi
+
+    python - << 'PY'
+import inspect
+import torch
+import transformers
+import diffusers
+import peft
+from diffusers import AutoencoderKLWan, StableDiffusion3Pipeline, WanPipeline, ZImagePipeline
+from transformers import CLIPTextModelWithProjection, Qwen2VLForConditionalGeneration, T5EncoderModel, UMT5EncoderModel
+from depth_anything_3.api import DepthAnything3
+import diffusionopsd
+from diffusionopsd.video.wan_geometry import require_expand_timesteps
+
+cuda = torch.version.cuda or ""
+assert torch.__version__.startswith("2.14."), torch.__version__
+assert cuda.startswith("13.0"), cuda
+assert transformers.__version__ == "4.51.3", transformers.__version__
+assert diffusers.__version__.startswith("0.39."), diffusers.__version__
+assert "expand_timesteps" in inspect.signature(WanPipeline.__init__).parameters
+assert StableDiffusion3Pipeline and ZImagePipeline and AutoencoderKLWan
+assert Qwen2VLForConditionalGeneration and UMT5EncoderModel and T5EncoderModel
+assert CLIPTextModelWithProjection and DepthAnything3 and require_expand_timesteps
+assert peft.__version__.startswith("0.17."), peft.__version__
+print("stack ok", torch.__version__, "cuda", cuda, "transformers", transformers.__version__)
+PY
+
+    chmod -R a+rX /opt/DiffusionOPSD /opt/constraints.txt
+
+%test
+    python -c "import torch, transformers; assert torch.version.cuda.startswith('13.0'); assert transformers.__version__ == '4.51.3'"
+
+%runscript
+    cd /opt/DiffusionOPSD
+    exec python "$@"
