@@ -23,6 +23,7 @@ from diffusionopsd.video.geo_reward import GeoReward
 from diffusionopsd.video.opa_video import opa_tr_step_nd
 from diffusionopsd.video.probe_stats import probe_summary
 from diffusionopsd.video.wan_clean_output import WanRollout, clean_output
+from diffusionopsd.video.wan_geometry import latent_shape_from_pipe
 
 
 def main():
@@ -56,13 +57,7 @@ def main():
     out = open(a.out, "w")
     for prompt in prompts:
         pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev)[:2]
-        shape = (
-            1,
-            pipe.transformer.config.in_channels,
-            (cfg.video.num_frames - 1) // 4 + 1,
-            cfg.video.height // 8,
-            cfg.video.width // 8,
-        )
+        shape = latent_shape_from_pipe(pipe, cfg.video.num_frames, cfg.video.height, cfg.video.width)
         z_T = torch.randn(shape, device=dev, dtype=torch.float32)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             rec = roll.rollout(pe, ne, z_T, cfg.opa.query_sigma)

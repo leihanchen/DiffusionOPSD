@@ -38,13 +38,9 @@ config_flags.DEFINE_config_file("config", "config/wan_video.py")
 
 
 def _latent_shape(pipe, cfg):
-    return (
-        1,
-        pipe.transformer.config.in_channels,
-        (cfg.video.num_frames - 1) // 4 + 1,
-        cfg.video.height // 8,
-        cfg.video.width // 8,
-    )
+    from diffusionopsd.video.wan_geometry import latent_shape_from_pipe
+
+    return latent_shape_from_pipe(pipe, cfg.video.num_frames, cfg.video.height, cfg.video.width)
 
 
 def _prompt_seed(prompt: str) -> int:

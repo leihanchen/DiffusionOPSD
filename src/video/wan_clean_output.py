@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import torch
 
+from diffusionopsd.video.wan_geometry import flow_timestep
+
 
 def clean_output(z: torch.Tensor, v: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
     s = sigma.to(z).view(-1, *([1] * (z.ndim - 1)))
@@ -35,8 +37,9 @@ class WanRollout:
         return self.pipe.scheduler.sigmas.to(device)  # length num_steps+1, ends at 0
 
     def velocity(self, z, sigma, prompt_embeds, negative_embeds, transformer=None):
-        tr = transformer or self.pipe.transformer
-        t = (sigma * 1000.0).expand(z.shape[0]).to(z)
+        tr = transformer if transformer is not None else self.pipe.transformer
+        expand = bool(getattr(self.pipe.config, "expand_timesteps", False))
+        t = flow_timestep(sigma, z, expand)
         v_c = tr(hidden_states=z, timestep=t, encoder_hidden_states=prompt_embeds, return_dict=False)[0]
         if self.g == 1.0:
             return v_c
