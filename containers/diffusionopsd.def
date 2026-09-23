@@ -69,12 +69,13 @@ From: pytorch/pytorch:2.14.0-cuda13.0-cudnn9-devel
 
 %environment
     export DIFFUSIONOPSD_ROOT=/opt/DiffusionOPSD
+    export VIRTUAL_ENV=/opt/venv
     export PYTHONPATH=/opt/DiffusionOPSD
     export PYTHONUNBUFFERED=1
     export TOKENIZERS_PARALLELISM=false
     export HF_HUB_DISABLE_TELEMETRY=1
     export WANDB_MODE=offline
-    export PATH=/usr/local/cuda/bin:${PATH}
+    export PATH=/opt/venv/bin:/usr/local/cuda/bin:${PATH}
     export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
     export CUDA_HOME=/usr/local/cuda
 
@@ -88,8 +89,16 @@ From: pytorch/pytorch:2.14.0-cuda13.0-cudnn9-devel
         libgl1 \
         libglib2.0-0 \
         libsm6 \
-        libxext6
+        libxext6 \
+        python3-venv
     rm -rf /var/lib/apt/lists/*
+
+    # The CUDA PyTorch image ships Debian Python 3.12 with PEP 668
+    # (externally-managed-environment). Install into a venv that still sees
+    # the image's torch/torchvision/triton wheels.
+    python -m venv --system-site-packages /opt/venv
+    export VIRTUAL_ENV=/opt/venv
+    export PATH=/opt/venv/bin:${PATH}
 
     python - << 'PY'
 from pathlib import Path
@@ -153,6 +162,17 @@ PY
         "icecream" \
         "opencv-python-headless" \
         "imageio" \
+        "moviepy>=1.0.3,<2" \
+        "addict" \
+        "plyfile" \
+        "pycolmap" \
+        "trimesh" \
+        "evo" \
+        "pillow-heif" \
+        "typer>=0.9.0" \
+        "fastapi" \
+        "uvicorn" \
+        "open3d" \
         "e3nn" \
         "pytest>=8.2" \
         "ruff>=0.8"
@@ -191,7 +211,7 @@ assert peft.__version__.startswith("0.17."), peft.__version__
 print("stack ok", torch.__version__, "cuda", cuda, "transformers", transformers.__version__)
 PY
 
-    chmod -R a+rX /opt/DiffusionOPSD /opt/constraints.txt
+    chmod -R a+rX /opt/DiffusionOPSD /opt/constraints.txt /opt/venv
 
 %test
     python -c "import torch, transformers; assert torch.version.cuda.startswith('13.0'); assert transformers.__version__ == '4.51.3'"
