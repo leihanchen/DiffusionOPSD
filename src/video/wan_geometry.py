@@ -34,6 +34,14 @@ def latent_shape_from_pipe(pipe, num_frames, height, width, batch=1):
     return latent_shape(batch, channels, num_frames, height, width, temporal, spatial, patch)
 
 
+def require_expand_timesteps(pipe, model_path):
+    """A TI2V pipeline whose diffusers build dropped expand_timesteps cannot train or score."""
+    if "TI2V-5B" in str(model_path) and not bool(getattr(pipe.config, "expand_timesteps", False)):
+        raise RuntimeError(
+            "This diffusers build did not set WanPipeline.config.expand_timesteps on Wan2.2-TI2V-5B"
+        )
+
+
 def flow_timestep(sigma, latents, expand_timesteps):
     """sigma is a scalar tensor. expand_timesteps fills one value per patch token."""
     base = (sigma.to(latents) * 1000.0).reshape(()).expand(latents.shape[0])

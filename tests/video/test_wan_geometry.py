@@ -1,6 +1,13 @@
+from pathlib import Path
+
 import pytest
 import torch
-from diffusionopsd.video.wan_geometry import flow_timestep, latent_shape, latent_shape_from_pipe
+from diffusionopsd.video.wan_geometry import (
+    flow_timestep,
+    latent_shape,
+    latent_shape_from_pipe,
+    require_expand_timesteps,
+)
 
 
 def test_wan21_latent_at_the_training_grid():
@@ -72,3 +79,26 @@ def test_velocity_expands_when_the_pipeline_says_so():
     z = torch.zeros(1, 48, 5, 30, 52)
     out = roll.velocity(z, torch.tensor(0.25), torch.zeros(1, 2), torch.zeros(1, 2))
     assert out.shape == z.shape
+
+
+def test_missing_expand_timesteps_on_ti2v_names_the_flag():
+    class Cfg:
+        pass
+
+    class Pipe:
+        config = Cfg()
+
+    with pytest.raises(RuntimeError, match="expand_timesteps"):
+        require_expand_timesteps(Pipe(), "/weights/Wan2.2-TI2V-5B-Diffusers")
+    require_expand_timesteps(Pipe(), "/weights/Wan2.1-T2V-1.3B-Diffusers")
+    Pipe.config.expand_timesteps = True
+    require_expand_timesteps(Pipe(), "/weights/Wan2.2-TI2V-5B-Diffusers")
+
+
+def test_train_eval_and_probe_reject_a_ti2v_build_without_expand_timesteps():
+    for name in (
+        "scripts/train_opsd_video_wan.py",
+        "scripts/eval_video_consistency.py",
+        "scripts/probe_fixed_suffix_video.py",
+    ):
+        assert "require_expand_timesteps" in Path(name).read_text()

@@ -57,10 +57,9 @@ def main(_):
     pipe = WanPipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16).to(dev)
     pipe.vae.requires_grad_(False)
     pipe.text_encoder.requires_grad_(False)
-    if "TI2V-5B" in model_path and not bool(getattr(pipe.config, "expand_timesteps", False)):
-        raise RuntimeError(
-            "This diffusers build did not set WanPipeline.config.expand_timesteps on Wan2.2-TI2V-5B"
-        )
+    from diffusionopsd.video.wan_geometry import require_expand_timesteps
+
+    require_expand_timesteps(pipe, model_path)
     if cfg.use_lora:
         pipe.transformer.requires_grad_(False)
         pipe.transformer.enable_gradient_checkpointing()

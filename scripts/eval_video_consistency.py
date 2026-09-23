@@ -63,6 +63,9 @@ def main():
     pipe = WanPipeline.from_pretrained(
         os.path.expandvars(cfg.pretrained.model), torch_dtype=torch.bfloat16
     ).to(dev)
+    from diffusionopsd.video.wan_geometry import require_expand_timesteps
+
+    require_expand_timesteps(pipe, os.path.expandvars(cfg.pretrained.model))
     if cfg.use_lora:
         from diffusionopsd.video.wan_policy import attach_lora
         from peft import set_peft_model_state_dict

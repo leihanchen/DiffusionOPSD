@@ -46,6 +46,9 @@ def main():
     cfg = _get_config(a.config)
     dev = "cuda:0"
     pipe = WanPipeline.from_pretrained(os.path.expandvars(cfg.pretrained.model), torch_dtype=torch.bfloat16).to(dev)
+    from diffusionopsd.video.wan_geometry import require_expand_timesteps
+
+    require_expand_timesteps(pipe, os.path.expandvars(cfg.pretrained.model))
     # fp32 master weights for the trained transformer (a bf16 AdamW step at lr=1e-4 underflows); VAE stays bf16.
     if not cfg.use_lora:
         pipe.transformer.to(torch.float32)
