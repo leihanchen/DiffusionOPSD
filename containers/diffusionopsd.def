@@ -33,17 +33,11 @@ From: pytorch/pytorch:2.14.0-cuda13.0-cudnn9-devel
 #   mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
 #   apptainer build $SCRATCH/diffusionopsd.sif containers/diffusionopsd.def
 #
-# Run on a GPU node. Bind scratch; the image does not contain checkpoints.
-#   export HF_HOME=$SCRATCH/hf
-#   export TORCH_HOME=$SCRATCH/torch
-#   export REWARD_CKPT_PATH=$SCRATCH/reward_ckpts
-#   export VIDEO_REWARD_CKPT_PATH=$SCRATCH/video_reward_ckpts
-#   apptainer exec --nv --bind $SCRATCH \
-#     --env HF_HOME=$HF_HOME,TORCH_HOME=$TORCH_HOME \
-#     --env REWARD_CKPT_PATH=$REWARD_CKPT_PATH \
-#     --env VIDEO_REWARD_CKPT_PATH=$VIDEO_REWARD_CKPT_PATH \
-#     $SCRATCH/diffusionopsd.sif \
-#     python scripts/train_opsd_video_wan.py --config config/wan22_ti2v.py
+# Run on a GPU node with scripts/train_opsd_video_wan.slurm. The image does not
+# contain checkpoints. Prefetch writes them into this repo:
+#   video_reward_ckpts/   Wan, VideoReward, Qwen2-VL, DA3, WAFT, DINOv2
+#   hf/                   Hugging Face cache used while downloading
+#   bash scripts/prefetch_wan22_login.sh
 
 %labels
     org.opencontainers.image.title DiffusionOPSD
@@ -55,7 +49,7 @@ From: pytorch/pytorch:2.14.0-cuda13.0-cudnn9-devel
 %help
     Compute Canada image for DiffusionOPSD.
     Host driver must support CUDA 13.0. Run with: apptainer exec --nv
-    Checkpoints stay on $SCRATCH; this image only has the software stack.
+    Checkpoints stay in the repo checkout (video_reward_ckpts/); this image only has the software stack.
 
 %files
     pyproject.toml /opt/DiffusionOPSD/pyproject.toml

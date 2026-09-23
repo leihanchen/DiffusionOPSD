@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Workstation helper. On Compute Canada, use scripts/prefetch_wan22_login.sh
+# instead. This script installs into the host Python and does not fetch
+# Qwen2-VL-2B-Instruct, which VideoReward loads on an offline node.
 set -euo pipefail
 TARGET=${VIDEO_REWARD_CKPT_PATH:-"$(pwd)/video_reward_ckpts"}
 mkdir -p "$TARGET"; export VIDEO_REWARD_CKPT_PATH="$TARGET"
