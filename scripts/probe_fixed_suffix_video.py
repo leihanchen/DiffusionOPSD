@@ -17,7 +17,6 @@ for path in (ROOT / "src", ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from config.wan_video import get_config
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
 from diffusionopsd.video.geo_reward import GeoReward
 from diffusionopsd.video.opa_video import opa_tr_step_nd
@@ -26,18 +25,30 @@ from diffusionopsd.video.wan_clean_output import WanRollout, clean_output
 from diffusionopsd.video.wan_geometry import latent_shape_from_pipe
 
 
+def _get_config(name):
+    if name == "wan22":
+        from config.wan22_ti2v import get_config
+    elif name == "wan21":
+        from config.wan_video import get_config
+    else:
+        raise SystemExit(f"unknown --config {name}")
+    return get_config()
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--prompts", required=True)
     p.add_argument("--n", type=int, default=64)
     p.add_argument("--out", default="probe_fixed_suffix.jsonl")
     p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--config", choices=("wan21", "wan22"), default="wan21")
     a = p.parse_args()
-    cfg = get_config()
+    cfg = _get_config(a.config)
     dev = "cuda:0"
     pipe = WanPipeline.from_pretrained(os.path.expandvars(cfg.pretrained.model), torch_dtype=torch.bfloat16).to(dev)
     # fp32 master weights for the trained transformer (a bf16 AdamW step at lr=1e-4 underflows); VAE stays bf16.
-    pipe.transformer.to(torch.float32)
+    if not cfg.use_lora:
+        pipe.transformer.to(torch.float32)
     pipe.vae.requires_grad_(False)
     pipe.text_encoder.requires_grad_(False)
     roll = WanRollout(pipe, cfg.sample.num_steps, cfg.sample.guidance_scale)
