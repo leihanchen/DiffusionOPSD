@@ -21,6 +21,7 @@ def lora_config():
     return LoraConfig(
         r=32,
         lora_alpha=64,
+        lora_dropout=0.0,
         init_lora_weights="gaussian",
         target_modules=list(LORA_TARGET_MODULES),
     )
