@@ -21,6 +21,7 @@ for path in (ROOT / "src", ROOT):
 from absl import app, flags
 from diffusers import WanPipeline
 from ml_collections import config_flags
+from peft import get_peft_model_state_dict
 import torch
 
 from diffusionopsd.ema import EMAModuleWrapper
@@ -32,6 +33,7 @@ from diffusionopsd.video.geo_reward import GeoReward
 from diffusionopsd.video.opa_video import opa_tr_step_nd
 from diffusionopsd.video.quality_judge import load_video_reward
 from diffusionopsd.video.wan_clean_output import WanRollout, clean_output
+from diffusionopsd.video.wan_policy import attach_lora, ema_adapter_
 
 FLAGS = flags.FLAGS
 config_flags.DEFINE_config_file("config", "config/wan_video.py")
@@ -55,9 +57,27 @@ def main(_):
     pipe = WanPipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16).to(dev)
     pipe.vae.requires_grad_(False)
     pipe.text_encoder.requires_grad_(False)
-    policy = pipe.transformer.to(torch.float32)
-    policy.enable_gradient_checkpointing()
-    behavior = copy.deepcopy(policy).requires_grad_(False)
+    if "TI2V-5B" in model_path and not bool(getattr(pipe.config, "expand_timesteps", False)):
+        raise RuntimeError(
+            "This diffusers build did not set WanPipeline.config.expand_timesteps on Wan2.2-TI2V-5B"
+        )
+    if cfg.use_lora:
+        pipe.transformer.requires_grad_(False)
+        pipe.transformer.enable_gradient_checkpointing()
+        policy = attach_lora(pipe.transformer, cfg.train.lora_path)
+        pipe.transformer = policy
+        behavior = None
+    else:
+        policy = pipe.transformer.to(torch.float32)
+        policy.enable_gradient_checkpointing()
+        behavior = copy.deepcopy(policy).requires_grad_(False)
+    trainable = [param for param in policy.parameters() if param.requires_grad]
+    opt = torch.optim.AdamW(
+        trainable, lr=cfg.train.learning_rate, weight_decay=cfg.train.adam_weight_decay
+    )
+    ema = None if cfg.use_lora else EMAModuleWrapper(
+        policy.parameters(), decay=0.99, update_step_interval=1, device=dev
+    )
     roll_old = WanRollout(pipe, cfg.sample.num_steps, cfg.sample.guidance_scale)
     reward = GeoReward(
         load_depth_anything3(cfg.reward_device),
@@ -70,10 +90,6 @@ def main(_):
     def R_geo(lat):
         return reward(roll_old.decode01(lat).to(cfg.reward_device)).geo.to(lat.device)
 
-    opt = torch.optim.AdamW(
-        policy.parameters(), lr=cfg.train.learning_rate, weight_decay=cfg.train.adam_weight_decay
-    )
-    ema = EMAModuleWrapper(policy.parameters(), decay=0.99, update_step_interval=1, device=dev)
     tracker = PerPromptStatTracker(cfg.sample.global_std)
     with open(cfg.prompt_fn_kwargs["path"]) as f:
         prompts = [line.strip() for line in f if line.strip()]
@@ -103,7 +119,10 @@ def main(_):
     for epoch in range(cfg.num_epochs):
         batch_prompts = random.sample(prompts, cfg.sample.num_batches_per_epoch)
         tuples = []
-        pipe.transformer = behavior
+        if cfg.use_lora:
+            policy.set_adapter("old")
+        else:
+            pipe.transformer = behavior
         for prompt in batch_prompts:
             pe, ne = pipe.encode_prompt(
                 prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev
@@ -169,7 +188,10 @@ def main(_):
                 y0, R_geo, cfg.opa.rho, cfg.opa.n_ascent, cfg.opa.eta, -1.0, first_grad=g0
             )
             kept.append(t)
-        pipe.transformer = policy
+        if cfg.use_lora:
+            policy.set_adapter("default")
+        else:
+            pipe.transformer = policy
         policy.train()
         opt.zero_grad()
         for t in kept:
@@ -192,12 +214,15 @@ def main(_):
                 cfg.beta,
             ).mean()
             (loss * cfg.train.adv_clip_max / max(len(kept), 1)).backward()
-        torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.train.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(trainable, cfg.train.max_grad_norm)
         opt.step()
-        ema.step(policy.parameters(), epoch)
-        with torch.no_grad():
-            for pb, pp in zip(behavior.parameters(), policy.parameters()):
-                pb.mul_(0.99).add_(pp.detach(), alpha=0.01)
+        if cfg.use_lora:
+            ema_adapter_(policy, src="default", dst="old", decay=0.99)
+        else:
+            ema.step(policy.parameters(), epoch)
+            with torch.no_grad():
+                for pb, pp in zip(behavior.parameters(), policy.parameters()):
+                    pb.mul_(0.99).add_(pp.detach(), alpha=0.01)
         print(
             json.dumps(
                 {
@@ -213,7 +238,11 @@ def main(_):
         )
         if (epoch + 1) % cfg.save_freq == 0:
             os.makedirs(cfg.logdir, exist_ok=True)
-            torch.save(policy.state_dict(), os.path.join(cfg.logdir, f"policy_{epoch+1}.pt"))
+            if cfg.use_lora:
+                state = get_peft_model_state_dict(policy, adapter_name="default")
+            else:
+                state = policy.state_dict()
+            torch.save(state, os.path.join(cfg.logdir, f"policy_{epoch+1}.pt"))
 
 
 if __name__ == "__main__":

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import torch
 from torch import nn
 from diffusionopsd.video.wan_policy import LORA_TARGET_MODULES, attach_lora, ema_adapter_
@@ -10,6 +12,17 @@ class Tiny(nn.Module):
 
     def forward(self, x):
         return self.to_q(x)
+
+
+def test_trainer_branches_on_use_lora():
+    text = Path("scripts/train_opsd_video_wan.py").read_text()
+    assert "attach_lora" in text
+    assert 'set_adapter("old")' in text
+    assert 'set_adapter("default")' in text
+    assert "ema_adapter_" in text
+    assert "if cfg.use_lora" in text
+    assert "copy.deepcopy(policy)" in text
+    assert "expand_timesteps" in text
 
 
 def test_targets_are_bare_suffixes():
