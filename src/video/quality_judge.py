@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import contextmanager
+from pathlib import Path
 
 import torch
 
@@ -57,16 +59,15 @@ def _to_pil(clip: torch.Tensor) -> list:
 class _VideoAlignScorer:
     """Calls the official VideoVLMRewardInference forward on in-memory frames."""
 
-    def __init__(self, inferencer):
+    def __init__(self, inferencer, build_prompt, process_vision_info):
         self.inferencer = inferencer
+        self.build_prompt = build_prompt
+        self.process_vision_info = process_vision_info
 
     def __call__(self, clip: torch.Tensor, prompt: str) -> dict:
-        from prompt_template import build_prompt
-        from vision_process import process_vision_info
-
         inf = self.inferencer
         cfg = inf.data_config
-        text = build_prompt(prompt, cfg.eval_dim, cfg.prompt_template_type)
+        text = self.build_prompt(prompt, cfg.eval_dim, cfg.prompt_template_type)
         video = {
             "type": "video",
             "video": _to_pil(clip),
@@ -79,7 +80,7 @@ class _VideoAlignScorer:
         else:
             video["nframes"] = cfg.num_frames
         chat = [[{"role": "user", "content": [video, {"type": "text", "text": text}]}]]
-        image_inputs, video_inputs = process_vision_info(chat)
+        image_inputs, video_inputs = self.process_vision_info(chat)
         batch = inf.processor(
             text=inf.processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True),
             images=image_inputs,
@@ -97,16 +98,47 @@ class _VideoAlignScorer:
         return reward
 
 
+@contextmanager
+def _videoalign_import_scope(repo: str):
+    """Temporarily resolve VideoAlign's flat imports during single-threaded startup.
+
+    WAFT also imports a top-level ``utils`` package. Restore existing modules
+    (including their children) even if VideoAlign initialization fails.
+    Callers must retain references to any VideoAlign helpers needed afterward.
+    """
+    local_names = {path.stem for path in Path(repo).glob("*.py")}
+
+    def is_local(name):
+        return name.split(".", 1)[0] in local_names
+
+    previous_modules = {name: module for name, module in sys.modules.copy().items() if is_local(name)}
+    previous_path = sys.path[:]
+    try:
+        for name in previous_modules:
+            del sys.modules[name]
+        sys.path.insert(0, repo)
+        yield
+    finally:
+        for name in list(sys.modules):
+            if is_local(name):
+                del sys.modules[name]
+        sys.modules.update(previous_modules)
+        sys.path[:] = previous_path
+
+
 def load_video_reward(device, num_frames: int = 8) -> VideoRewardJudge:
     """Load KwaiVGI/VideoReward via the VideoAlign repo cloned under VIDEO_REWARD_CKPT_PATH."""
     root = os.environ["VIDEO_REWARD_CKPT_PATH"]
     repo = os.path.join(root, "VideoAlign")
     ckpt = os.path.join(root, "VideoReward")
-    if repo not in sys.path:
-        sys.path.insert(0, repo)
-    from inference import VideoVLMRewardInference
+    with _videoalign_import_scope(repo):
+        from inference import VideoVLMRewardInference
+        from prompt_template import build_prompt
+        from vision_process import process_vision_info
 
-    inferencer = VideoVLMRewardInference(ckpt, device=device, dtype=torch.bfloat16)
+        inferencer = VideoVLMRewardInference(ckpt, device=device, dtype=torch.bfloat16)
     inferencer.model.requires_grad_(False)
     inferencer.model.eval()
-    return VideoRewardJudge(_VideoAlignScorer(inferencer), num_frames=num_frames)
+    return VideoRewardJudge(
+        _VideoAlignScorer(inferencer, build_prompt, process_vision_info), num_frames=num_frames
+    )
