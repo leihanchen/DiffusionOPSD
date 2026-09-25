@@ -26,3 +26,33 @@ def test_dino_wrapper_returns_normalized_patch_grid():
     out = fx(torch.rand(2, 3, 28, 42))
     assert out.shape == (2, 8, 2, 3)
     assert torch.allclose(out.norm(dim=1), torch.ones(2, 2, 3), atol=1e-5)
+
+
+class _Prediction:
+    def __init__(self):
+        self.depth = torch.ones(2, 4, 6).numpy()
+        self.conf = torch.full((2, 4, 6), 2.0).numpy()
+        self.intrinsics = torch.tensor(
+            [[[6.0, 0.0, 3.0], [0.0, 4.0, 2.0], [0.0, 0.0, 1.0]]] * 2
+        ).numpy()
+        w2c = torch.eye(4).repeat(2, 1, 1)
+        w2c[1, 0, 3] = -0.2
+        self.extrinsics = w2c.numpy()
+
+
+class _StubDA3:
+    def inference(self, images, process_res=None):
+        assert len(images) == 2
+        assert images[0].shape == (8, 10, 3)
+        return _Prediction()
+
+
+def test_da3_adapter_maps_prediction_to_frame_space():
+    from diffusionopsd.video.estimators import DepthAnything3
+
+    out = DepthAnything3(_StubDA3(), process_res=14)(torch.rand(1, 2, 3, 8, 10))
+    assert out.depth.shape == (1, 2, 8, 10)
+    assert out.conf.shape == (1, 2, 8, 10)
+    assert torch.equal(out.conf, torch.ones(1, 2, 8, 10))
+    assert torch.isclose(out.K[0, 0, 0], torch.tensor(10.0))
+    assert torch.isclose(out.poses[0, 1, 0, 3], torch.tensor(0.2))

@@ -54,7 +54,9 @@ def main(_):
     cfg = FLAGS.config
     dev = "cuda:0"
     model_path = os.path.expandvars(cfg.pretrained.model)
-    pipe = WanPipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16).to(dev)
+    pipe = WanPipeline.from_pretrained(
+        model_path, torch_dtype=torch.bfloat16, local_files_only=True
+    ).to(dev)
     pipe.vae.requires_grad_(False)
     pipe.text_encoder.requires_grad_(False)
     from diffusionopsd.video.wan_geometry import require_expand_timesteps

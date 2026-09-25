@@ -20,9 +20,9 @@
 #   KwaiVGI/VideoReward          (model_config.json + checkpoint-*/model.pth)
 #   KwaiVGI/VideoAlign           (loader; patched below to use SDPA)
 #   Qwen/Qwen2-VL-2B-Instruct    (VideoReward's base; the saved config names this hub id)
-#   depth-anything/DA3LARGE-1.1
-#   princeton-vl/WAFT            (repo + waft_tar_c_t.pth)
-#   facebookresearch/dinov2      (torch.hub cache + dinov2_vitb14 weights)
+#   depth-anything/DA3-LARGE-1.1
+#   princeton-vl/WAFT            (repo + official a1 tar-c-t.pth)
+#   facebook/dinov2-base         (Transformers snapshot, loaded offline)
 #   data/video_motion/train.txt and test.txt
 # The prompt files ship in this repo. There is no video-clip dataset to download.
 #
@@ -69,10 +69,12 @@ SIF=""
 if [[ -n "${SCRATCH:-}" && ! -e "${SCRATCH}/diffusionopsd.sif" && -e "${SCRATCH}/DiffusionOPSD/containers/diffusionopsd.sif" ]]; then
   ln -sfn "${SCRATCH}/DiffusionOPSD/containers/diffusionopsd.sif" "${SCRATCH}/diffusionopsd.sif"
 fi
-if [[ -n "${SCRATCH:-}" && -s "${SCRATCH}/diffusionopsd.sif" ]]; then
-  SIF="${SCRATCH}/diffusionopsd.sif"
-elif [[ -s "${REPO}/containers/diffusionopsd.sif" ]]; then
+# Prefer the image next to the repo. $SCRATCH/diffusionopsd.sif is only a
+# convenience symlink, and it disappeared mid-download on this login node.
+if [[ -s "${REPO}/containers/diffusionopsd.sif" ]]; then
   SIF="${REPO}/containers/diffusionopsd.sif"
+elif [[ -n "${SCRATCH:-}" && -s "${SCRATCH}/diffusionopsd.sif" ]]; then
+  SIF="${SCRATCH}/diffusionopsd.sif"
 elif [[ -s "${REPO}/diffusionopsd.sif" ]]; then
   SIF="${REPO}/diffusionopsd.sif"
 else
@@ -93,6 +95,10 @@ else
   apptainer_binds+=(--bind "${REPO}")
 fi
 
+# TamIA login nodes cap this user cgroup at 4 GiB and SIGKILL anything over it.
+# hf download defaults to 8 workers, and hf_xet (installed in the image) keeps
+# large reconstruction buffers. One HTTP worker stays under that cap. Partial
+# .incomplete files from the killed run are still resumed.
 hf_download() {
   apptainer exec "${apptainer_binds[@]}" \
     --env "HF_HOME=${HF_HOME}" \
@@ -100,7 +106,8 @@ hf_download() {
     --env TRANSFORMERS_OFFLINE=0 \
     --env HF_DATASETS_OFFLINE=0 \
     --env HF_HUB_DISABLE_TELEMETRY=1 \
-    "${SIF}" hf download "$@"
+    --env HF_HUB_DISABLE_XET=1 \
+    "${SIF}" hf download --max-workers 1 "$@"
 }
 
 clone_repo() {
@@ -193,11 +200,12 @@ verify_offline_tree() {
   require_weights "${QWEN}"
   require_file "${TARGET}/depth-anything-3-large-v1.1/config.json"
   require_weights "${TARGET}/depth-anything-3-large-v1.1"
-  require_file "${TARGET}/WAFT/config/eval/sintel.json"
-  require_file "${TARGET}/WAFT/core/waft.py"
+  require_file "${TARGET}/WAFT/config/tar-c-t.json"
+  require_file "${TARGET}/WAFT/model/vitwarp_v8.py"
+  require_file "${TARGET}/WAFT/depth-anything-ckpts/depth_anything_v2_vits.pth"
   require_file "${TARGET}/waft_tar_c_t.pth"
-  require_file "${TARGET}/torch_hub/facebookresearch_dinov2_main/hubconf.py"
-  require_file "${TARGET}/torch_hub/checkpoints/dinov2_vitb14_pretrain.pth"
+  require_file "${TARGET}/dinov2-base/config.json"
+  require_weights "${TARGET}/dinov2-base"
   require_file "${REPO}/data/video_motion/train.txt"
   require_file "${REPO}/data/video_motion/test.txt"
 
@@ -252,6 +260,44 @@ if [[ "${CHECK_ONLY}" -eq 0 ]]; then
   # A login shell may have inherited the compute-node offline flags.
   unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE HF_DATASETS_OFFLINE || true
 
+  # cgroup v2 charges written page cache to this 4 GiB login slice. A multi-GB
+  # shard will OOM unless those pages are dropped while the download runs.
+  python3 - "${TARGET}" "${HF_HOME}" "$$" <<'PY' &
+import ctypes, ctypes.util, os, pathlib, sys, time
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+DONTNEED = 4
+roots = [pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])]
+parent = int(sys.argv[3])
+
+def drop():
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                if path.stat().st_size < 8 * 1024 * 1024 and not path.name.endswith(".incomplete"):
+                    continue
+                fd = os.open(path, os.O_RDONLY)
+            except OSError:
+                continue
+            try:
+                libc.posix_fadvise(fd, 0, 0, DONTNEED)
+            finally:
+                os.close(fd)
+
+while True:
+    try:
+        os.kill(parent, 0)
+    except OSError:
+        break
+    drop()
+    time.sleep(2)
+PY
+  CACHE_DROPPER_PID=$!
+  trap 'kill "${CACHE_DROPPER_PID}" 2>/dev/null || true' EXIT
+
   echo "Downloading Wan2.2-TI2V-5B-Diffusers"
   hf_download Wan-AI/Wan2.2-TI2V-5B-Diffusers --local-dir "${TARGET}/Wan2.2-TI2V-5B-Diffusers"
 
@@ -262,32 +308,62 @@ if [[ "${CHECK_ONLY}" -eq 0 ]]; then
   hf_download Qwen/Qwen2-VL-2B-Instruct --local-dir "${QWEN}"
 
   echo "Downloading Depth Anything 3 Large v1.1"
-  hf_download depth-anything/DA3LARGE-1.1 --local-dir "${TARGET}/depth-anything-3-large-v1.1"
+  hf_download depth-anything/DA3-LARGE-1.1 --local-dir "${TARGET}/depth-anything-3-large-v1.1"
 
-  echo "Downloading WAFT checkpoint"
-  hf_download princeton-vl/WAFT waft_tar_c_t.pth --local-dir "${TARGET}"
+  echo "Downloading WAFT checkpoint (official a1 tar-c-t.pth)"
+  WAFT_CKPT="${TARGET}/waft_tar_c_t.pth"
+  if [[ ! -s "${WAFT_CKPT}" ]]; then
+    python3 - "${WAFT_CKPT}" <<'PY'
+import re
+import sys
+import urllib.parse
+import urllib.request
+from pathlib import Path
 
-  echo "Cloning VideoAlign, WAFT, and DINOv2"
-  clone_repo https://github.com/KwaiVGI/VideoAlign.git "${TARGET}/VideoAlign" inference.py
-  clone_repo https://github.com/princeton-vl/WAFT.git "${TARGET}/WAFT" core/waft.py
-  clone_repo https://github.com/facebookresearch/dinov2.git \
-    "${TARGET}/torch_hub/facebookresearch_dinov2_main" hubconf.py
-
-  DINO_CKPT="${TARGET}/torch_hub/checkpoints/dinov2_vitb14_pretrain.pth"
-  if [[ ! -s "${DINO_CKPT}" ]]; then
-    echo "Downloading DINOv2 ViT-B/14 weights"
-    if command -v curl >/dev/null 2>&1; then
-      curl -L --fail --retry 5 --retry-delay 2 -o "${DINO_CKPT}.partial" \
-        https://dl.fbaipublicfiles.com/dinov2/dinov2_vitb14/dinov2_vitb14_pretrain.pth
-    elif command -v wget >/dev/null 2>&1; then
-      wget -O "${DINO_CKPT}.partial" \
-        https://dl.fbaipublicfiles.com/dinov2/dinov2_vitb14/dinov2_vitb14_pretrain.pth
-    else
-      echo "Need curl or wget to fetch DINOv2 weights." >&2
-      exit 1
-    fi
-    mv "${DINO_CKPT}.partial" "${DINO_CKPT}"
+dest = Path(sys.argv[1])
+partial = dest.with_name(dest.name + ".partial")
+page = "https://drive.usercontent.google.com/download?id=1CxzBQx0iSg6AyIgt6MF0ROlF_cAeZLPC&export=download"
+req = urllib.request.Request(page, headers={"User-Agent": "Mozilla/5.0"})
+with urllib.request.urlopen(req, timeout=60) as response:
+    html = response.read().decode("utf-8", "replace")
+action = re.search(r'action="([^"]+)"', html).group(1)
+fields = dict(re.findall(r'name="([^"]+)" value="([^"]*)"', html))
+url = action + "?" + urllib.parse.urlencode(fields)
+req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+with urllib.request.urlopen(req, timeout=60) as response, partial.open("wb") as out:
+    if "text/html" in (response.headers.get("Content-Type") or ""):
+        raise SystemExit("Google Drive returned HTML instead of tar-c-t.pth")
+    while True:
+        chunk = response.read(1024 * 1024)
+        if not chunk:
+            break
+        out.write(chunk)
+partial.replace(dest)
+print(dest, dest.stat().st_size)
+PY
   fi
+
+  echo "Cloning VideoAlign and WAFT"
+  clone_repo https://github.com/KwaiVGI/VideoAlign.git "${TARGET}/VideoAlign" inference.py
+  # a1 commit matches waft_tar_c_t.pth. The default branch is waftv2 and has a different API.
+  if [[ ! -f "${TARGET}/WAFT/model/vitwarp_v8.py" ]]; then
+    rm -rf "${TARGET}/WAFT"
+    git clone --filter=blob:none --no-checkout https://github.com/princeton-vl/WAFT.git "${TARGET}/WAFT"
+    git -C "${TARGET}/WAFT" fetch --depth 1 origin 8dd41723f5
+    git -C "${TARGET}/WAFT" checkout --detach 8dd41723f5
+  fi
+
+  DA2_CKPT="${TARGET}/WAFT/depth-anything-ckpts/depth_anything_v2_vits.pth"
+  if [[ ! -s "${DA2_CKPT}" ]]; then
+    echo "Downloading Depth Anything V2 Small (WAFT backbone)"
+    mkdir -p "${TARGET}/WAFT/depth-anything-ckpts"
+    curl -L --fail --retry 5 --retry-delay 2 -o "${DA2_CKPT}.partial" \
+      https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth
+    mv "${DA2_CKPT}.partial" "${DA2_CKPT}"
+  fi
+
+  echo "Downloading DINOv2 base (Transformers snapshot)"
+  hf_download facebook/dinov2-base --local-dir "${TARGET}/dinov2-base"
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then
