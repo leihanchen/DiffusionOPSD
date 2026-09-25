@@ -40,7 +40,7 @@ class _Prediction:
         self.extrinsics = w2c.numpy()
 
 
-class _StubDA3:
+class _StubDA3(torch.nn.Module):
     def inference(self, images, process_res=None):
         assert len(images) == 2
         assert images[0].shape == (8, 10, 3)

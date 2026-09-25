@@ -11,6 +11,7 @@
 #
 # Submit from the repo root on a Narval login node:
 #   sbatch scripts/train_opsd_video_wan.slurm
+# One-hour debugging run: two calibration prompts, one epoch, then save.
 #
 # Narval GPUs are A100-40GB, not H100. The trainer uses cuda:0 for the policy
 # and cuda:1 for the rewards, so this asks for two A100s on the 3-hour by-GPU
@@ -87,9 +88,12 @@ APPTAINER_BINDS+=(--bind "${REPO}/src:/opt/venv/lib/python3.12/site-packages/dif
 bash scripts/prefetch_wan22_login.sh --check-only
 
 # Batch shells do not inherit login modules.
+# Cluster initialization reads optional variables that may be unset.
+set +u
 # shellcheck disable=SC1091
 source /cvmfs/soft.computecanada.ca/config/profile/bash.sh
 module load apptainer
+set -u
 
 echo "Starting Wan OPSD on $(hostname) at $(date -Is)"
 echo "HF_HUB_OFFLINE=${HF_HUB_OFFLINE} WANDB_MODE=${WANDB_MODE}"
@@ -97,7 +101,9 @@ echo "SIF=${SIF}"
 echo "VIDEO_REWARD_CKPT_PATH=${VIDEO_REWARD_CKPT_PATH}"
 echo "HF_HOME=${HF_HOME}"
 
+# Keep host ~/.local packages from overriding the container's Python stack.
 apptainer exec --nv "${APPTAINER_BINDS[@]}" --pwd "${PWD}" \
+  --env PYTHONNOUSERSITE=1 \
   --env "HF_HOME=${HF_HOME}" \
   --env "VIDEO_REWARD_CKPT_PATH=${VIDEO_REWARD_CKPT_PATH}" \
   --env HF_HUB_OFFLINE=1 \
@@ -110,4 +116,5 @@ apptainer exec --nv "${APPTAINER_BINDS[@]}" --pwd "${PWD}" \
   --env "XDG_CACHE_HOME=${XDG_CACHE_HOME}" \
   --env GIT_TERMINAL_PROMPT=0 \
   "${SIF}" \
-  python scripts/train_opsd_video_wan.py --config config/wan22_ti2v.py
+  python scripts/train_opsd_video_wan.py --config config/wan22_ti2v_debug.py \
+    --config.logdir="${REPO}/logs/wan22-debug-${SLURM_JOB_ID}"

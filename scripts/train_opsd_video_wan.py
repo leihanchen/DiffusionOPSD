@@ -215,8 +215,15 @@ def main(_):
                 cfg.beta,
             ).mean()
             (loss * cfg.train.adv_clip_max / max(len(kept), 1)).backward()
-        torch.nn.utils.clip_grad_norm_(trainable, cfg.train.max_grad_norm)
+        grad_norm = torch.nn.utils.clip_grad_norm_(trainable, cfg.train.max_grad_norm)
+        if cfg.debug and (not torch.isfinite(grad_norm) or grad_norm <= 0):
+            raise RuntimeError(
+                f"Debug run did not produce finite nonzero gradients: "
+                f"n_kept={len(kept)}, grad_norm={float(grad_norm)}"
+            )
         opt.step()
+        if cfg.debug:
+            print(json.dumps({"optimizer_step_completed": True, "grad_norm": float(grad_norm)}), flush=True)
         if cfg.use_lora:
             ema_adapter_(policy, src="default", dst="old", decay=0.99)
         else:
@@ -243,7 +250,9 @@ def main(_):
                 state = get_peft_model_state_dict(policy, adapter_name="default")
             else:
                 state = policy.state_dict()
-            torch.save(state, os.path.join(cfg.logdir, f"policy_{epoch+1}.pt"))
+            checkpoint_path = os.path.join(cfg.logdir, f"policy_{epoch+1}.pt")
+            torch.save(state, checkpoint_path)
+            print(json.dumps({"checkpoint_saved": checkpoint_path}), flush=True)
 
 
 if __name__ == "__main__":
