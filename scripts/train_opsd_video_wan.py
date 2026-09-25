@@ -58,7 +58,10 @@ def main(_):
         model_path, torch_dtype=torch.bfloat16, local_files_only=True
     ).to(dev)
     pipe.vae.requires_grad_(False)
+    pipe.vae.to(getattr(cfg, "vae_device", dev))
     pipe.text_encoder.requires_grad_(False)
+    print(json.dumps({"policy_device": dev, "vae_device": str(pipe.vae.device),
+                      "reward_device": cfg.reward_device}), flush=True)
     from diffusionopsd.video.wan_geometry import require_expand_timesteps
 
     require_expand_timesteps(pipe, model_path)

@@ -13,10 +13,11 @@
 #   sbatch scripts/train_opsd_video_wan.slurm
 # One-hour debugging run: two calibration prompts, one epoch, then save.
 #
-# Narval GPUs are A100-40GB, not H100. The trainer uses cuda:0 for the policy
-# and cuda:1 for the rewards, so this asks for two A100s on the 3-hour by-GPU
-# partition rather than a whole four-GPU node. 24 CPUs and 240G match Narval's
-# 12 CPU / ~124G per A100 share. Do not name a node.
+# Narval GPUs are A100-40GB, not H100. The trainer uses cuda:0 for the policy,
+# cuda:1 for rewards, and cuda:2 for the differentiable VAE decode. A separate
+# VAE GPU avoids the measured 40GB peak on cuda:0 during geometry backward.
+# Keep 24 CPUs and 240G; the prior run used less than 60G of host memory.
+# Do not name a node.
 #SBATCH --job-name=wan22-opsd
 #SBATCH --account=def-wangcs
 #SBATCH --partition=gpubase_bygpu_b1
@@ -24,7 +25,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=240G
-#SBATCH --gpus-per-node=a100:2
+#SBATCH --gpus-per-node=a100:3
 #SBATCH --time=01:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err

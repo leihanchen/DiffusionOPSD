@@ -73,7 +73,7 @@ class WanRollout:
         mean = torch.tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1).to(latents)
         std = 1.0 / torch.tensor(vae.config.latents_std).view(1, -1, 1, 1, 1).to(latents)
         lat = latents / std + mean
-        lat = lat.to(vae.dtype)
+        lat = lat.to(device=vae.device, dtype=vae.dtype)
         if torch.is_grad_enabled() and lat.requires_grad:
             # Recompute the frozen decoder during backward instead of retaining every frame's activations.
             video = checkpoint(lambda z: vae.decode(z, return_dict=False)[0], lat, use_reentrant=False)
