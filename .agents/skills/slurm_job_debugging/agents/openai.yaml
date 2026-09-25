@@ -1,0 +1,4 @@
+interface:
+  display_name: "Slurm Job Debugging"
+  short_description: "Monitor and repair Slurm jobs with bounded retries"
+  default_prompt: "Use $slurm_job_debugging with the supplied Slurm script path or job ID to monitor every 10 minutes, fix and commit failures, and submit at most three times."
