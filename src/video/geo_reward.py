@@ -6,6 +6,7 @@ from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from diffusionopsd.video.estimators import DepthEstimator, FlowEstimator, PatchFeatureExtractor, relative_pose
 from diffusionopsd.video.rigid_flow import reprojection_residual, rigid_flow
@@ -40,20 +41,30 @@ class GeoReward(torch.nn.Module):
         self.depth, self.flow, self.feats = depth, flow, feats
         self.w_rigid, self.w_dino, self.residual_scale = w_rigid, w_dino, residual_scale
 
+    def _pair_terms(self, a, b, depth, K, pose, conf):
+        flow = self.flow(a, b)
+        rig = rigid_flow(depth, K, pose)
+        rigid_term = -self.residual_scale * reprojection_residual(flow, rig, conf)
+        fa, fb = self.feats(a), self.feats(b)
+        sim = (fa * warp_features(fb, flow)).sum(dim=1)
+        dino_term = sim.flatten(1).mean(1)
+        motion_term = flow.norm(dim=1).flatten(1).mean(1)
+        return rigid_term, dino_term, motion_term
+
     def forward(self, frames01: torch.Tensor) -> GeoRewardOutput:
         B, T, _, H, W = frames01.shape
         d = self.depth(frames01)
         rigid_terms, dino_terms, motion_terms = [], [], []
         for t in range(T - 1):
             a, b = frames01[:, t], frames01[:, t + 1]
-            flow = self.flow(a, b)
-            rig = rigid_flow(d.depth[:, t], d.K, relative_pose(d.poses, t))
-            res = reprojection_residual(flow, rig, d.conf[:, t])
-            rigid_terms.append(-self.residual_scale * res)
-            fa, fb = self.feats(a), self.feats(b)
-            sim = (fa * warp_features(fb, flow)).sum(dim=1)  # cosine, [B,h,w]
-            dino_terms.append(sim.flatten(1).mean(1))
-            motion_terms.append(flow.norm(dim=1).flatten(1).mean(1))
+            inputs = (a, b, d.depth[:, t], d.K, relative_pose(d.poses, t), d.conf[:, t])
+            if torch.is_grad_enabled() and (a.requires_grad or b.requires_grad):
+                terms = checkpoint(self._pair_terms, *inputs, use_reentrant=False)
+            else:
+                terms = self._pair_terms(*inputs)
+            rigid_terms.append(terms[0])
+            dino_terms.append(terms[1])
+            motion_terms.append(terms[2])
         rigid = torch.stack(rigid_terms, 1).mean(1)
         dino = torch.stack(dino_terms, 1).mean(1)
         motion = torch.stack(motion_terms, 1).mean(1).detach()

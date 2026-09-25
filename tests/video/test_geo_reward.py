@@ -55,6 +55,31 @@ def test_geo_is_differentiable_wrt_frames():
     assert frames.grad is not None and torch.isfinite(frames.grad).all()
 
 
+def test_geo_recomputes_pair_rewards_during_backward():
+    class CountingFlow(StubFlow):
+        def __init__(self):
+            super().__init__(2.5)
+            self.calls = 0
+
+        def __call__(self, a, b):
+            self.calls += 1
+            return super().__call__(a, b)
+
+    class DifferentiableFeats:
+        def __call__(self, imgs):
+            return torch.nn.functional.normalize(imgs[:, :2, ::14, ::14], dim=1)
+
+    flow = CountingFlow()
+    frames = torch.rand(1, 3, 3, 28, 28, requires_grad=True)
+    reward = GeoReward(StubDepth(0.1), flow, DifferentiableFeats())
+
+    reward(frames).geo.sum().backward()
+
+    assert flow.calls == 4  # two adjacent pairs, each recomputed for its gradient
+    assert frames.grad is not None and torch.isfinite(frames.grad).all()
+    assert (frames.grad.abs().flatten(2).sum(dim=2) > 0).all()
+
+
 def test_warp_features_identity_for_zero_flow():
     feat = torch.rand(1, 4, 2, 3)
     assert torch.allclose(warp_features(feat, torch.zeros(1, 2, 28, 42)), feat, atol=1e-5)
