@@ -30,8 +30,11 @@ class RolloutRecord:
 
 
 class WanRollout:
-    def __init__(self, pipeline, num_steps: int, guidance_scale: float):
+    def __init__(
+        self, pipeline, num_steps: int, guidance_scale: float, offload_vae_activations: bool = False
+    ):
         self.pipe, self.num_steps, self.g = pipeline, num_steps, guidance_scale
+        self.offload_vae_activations = offload_vae_activations
 
     def _sigmas(self, device):
         self.pipe.scheduler.set_timesteps(self.num_steps, device=device)
@@ -75,8 +78,12 @@ class WanRollout:
         lat = latents / std + mean
         lat = lat.to(device=vae.device, dtype=vae.dtype)
         if torch.is_grad_enabled() and lat.requires_grad:
-            # Recompute the frozen decoder during backward instead of retaining every frame's activations.
-            video = checkpoint(lambda z: vae.decode(z, return_dict=False)[0], lat, use_reentrant=False)
+            if self.offload_vae_activations:
+                # The full-video decoder graph exceeds one A100; keep its saved tensors in host RAM.
+                with torch.autograd.graph.save_on_cpu():
+                    video = vae.decode(lat, return_dict=False)[0]
+            else:
+                video = checkpoint(lambda z: vae.decode(z, return_dict=False)[0], lat, use_reentrant=False)
         else:
             video = vae.decode(lat, return_dict=False)[0]
         return (video / 2 + 0.5).clamp(0, 1).float().permute(0, 2, 1, 3, 4)

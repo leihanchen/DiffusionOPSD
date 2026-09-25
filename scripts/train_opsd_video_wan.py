@@ -82,7 +82,10 @@ def main(_):
     ema = None if cfg.use_lora else EMAModuleWrapper(
         policy.parameters(), decay=0.99, update_step_interval=1, device=dev
     )
-    roll_old = WanRollout(pipe, cfg.sample.num_steps, cfg.sample.guidance_scale)
+    roll_old = WanRollout(
+        pipe, cfg.sample.num_steps, cfg.sample.guidance_scale,
+        offload_vae_activations=bool(getattr(cfg, "offload_vae_activations", False)),
+    )
     reward = GeoReward(
         load_depth_anything3(cfg.reward_device),
         load_waft(cfg.reward_device),
