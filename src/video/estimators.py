@@ -193,6 +193,15 @@ class DepthAnything3(torch.nn.Module):
             intrinsics = torch.as_tensor(pred.intrinsics, device=frames01.device, dtype=torch.float32)
             Ks.append(_scale_intrinsics(intrinsics[0], src_hw, (H, W)))
             w2c = torch.as_tensor(pred.extrinsics, device=frames01.device, dtype=torch.float32)
+            if w2c.shape == (T, 3, 4):
+                homogeneous = torch.eye(4, device=w2c.device, dtype=w2c.dtype).expand(T, -1, -1).clone()
+                homogeneous[:, :3] = w2c
+                w2c = homogeneous
+            elif w2c.shape != (T, 4, 4):
+                raise RuntimeError(
+                    f"DA3 returned extrinsics with shape {tuple(w2c.shape)}, "
+                    f"expected [{T},3,4] or [{T},4,4]"
+                )
             poses_list.append(torch.linalg.inv(w2c))
         return DepthOutput(
             torch.stack(depths),
