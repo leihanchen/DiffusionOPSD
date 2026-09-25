@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+from torch.utils.checkpoint import checkpoint
 
 from diffusionopsd.video.wan_geometry import flow_timestep
 
@@ -72,5 +73,10 @@ class WanRollout:
         mean = torch.tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1).to(latents)
         std = 1.0 / torch.tensor(vae.config.latents_std).view(1, -1, 1, 1, 1).to(latents)
         lat = latents / std + mean
-        video = vae.decode(lat.to(vae.dtype), return_dict=False)[0]  # [B,3,T,H,W] in [-1,1]
+        lat = lat.to(vae.dtype)
+        if torch.is_grad_enabled() and lat.requires_grad:
+            # Recompute the frozen decoder during backward instead of retaining every frame's activations.
+            video = checkpoint(lambda z: vae.decode(z, return_dict=False)[0], lat, use_reentrant=False)
+        else:
+            video = vae.decode(lat, return_dict=False)[0]
         return (video / 2 + 0.5).clamp(0, 1).float().permute(0, 2, 1, 3, 4)
