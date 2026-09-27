@@ -1,4 +1,4 @@
-"""One-epoch debugging run at the normal video resolution and sampling steps."""
+"""Four-update debugging run at the normal video resolution and sampling steps."""
 
 from config.wan22_ti2v import get_config as wan22_config
 
@@ -9,6 +9,6 @@ def get_config():
     config.vae_device = "cuda:2"
     config.offload_vae_activations = True
     config.gates.calib_prompts = 2
-    config.num_epochs = 1
+    config.num_epochs = 4
     config.save_freq = 1
     return config

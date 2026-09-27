@@ -7,11 +7,13 @@
 #   hf/                   Hugging Face cache
 #   data/video_motion/    train.txt and test.txt, already in git
 # The image is containers/diffusionopsd.sif in this checkout. Do not use a
-# $SCRATCH/diffusionopsd.sif symlink. Job temp and W&B files stay on scratch.
+# $SCRATCH/diffusionopsd.sif symlink. Job temp stays on scratch; offline W&B
+# runs and metrics stay beside checkpoints under logs/.
 #
 # Submit from the repo root on a Narval login node:
 #   sbatch scripts/train_opsd_video_wan.slurm
-# One-hour debugging run: two calibration prompts, one epoch, then save.
+# Four-hour debugging run: two calibration prompts, four updates, save each update.
+# gpubase_bygpu_b1 caps at 3 hours, so 4 hours must use b2 (12-hour max).
 #
 # Narval GPUs are A100-40GB, not H100. The trainer uses cuda:0 for the policy,
 # cuda:1 for rewards, and cuda:2 for the differentiable VAE decode. A separate
@@ -20,13 +22,13 @@
 # Do not name a node.
 #SBATCH --job-name=wan22-opsd
 #SBATCH --account=def-wangcs
-#SBATCH --partition=gpubase_bygpu_b1
+#SBATCH --partition=gpubase_bygpu_b2
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=240G
 #SBATCH --gpus-per-node=a100:3
-#SBATCH --time=01:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 
@@ -43,13 +45,13 @@ mkdir -p logs
 # Stay offline. Do not load httpproxy. Narval nodes can reach the network,
 # but this job must use the prefetched tree, not the hub.
 # Model files are the checkout's video_reward_ckpts/ and hf/. The image is
-# containers/diffusionopsd.sif. Scratch holds W&B and node temp only.
+# containers/diffusionopsd.sif. Scratch holds node temp only.
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export HF_HUB_DISABLE_TELEMETRY=1
 export WANDB_MODE=offline
-export WANDB_DIR="${SCRATCH}/wandb"
+export WANDB_DIR="${REPO}/logs/wan22-debug-${SLURM_JOB_ID}"
 export HF_HOME="${REPO}/hf"
 export TORCH_HOME="${REPO}/video_reward_ckpts"
 export VIDEO_REWARD_CKPT_PATH="${REPO}/video_reward_ckpts"

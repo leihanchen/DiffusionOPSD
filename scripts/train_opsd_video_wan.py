@@ -9,22 +9,21 @@ import copy
 import hashlib
 import json
 import os
-from pathlib import Path
 import random
 import sys
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 for path in (ROOT / "src", ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
+import torch
+import wandb
 from absl import app, flags
 from diffusers import WanPipeline
-from ml_collections import config_flags
-from peft import get_peft_model_state_dict
-import torch
-
 from diffusionopsd.ema import EMAModuleWrapper
+from diffusionopsd.metrics import install_wandb_jsonl_tee
 from diffusionopsd.stat_tracking import PerPromptStatTracker
 from diffusionopsd.video.branch_loss import branch_loss
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
@@ -34,6 +33,8 @@ from diffusionopsd.video.opa_video import opa_tr_step_nd
 from diffusionopsd.video.quality_judge import load_video_reward
 from diffusionopsd.video.wan_clean_output import WanRollout, clean_output
 from diffusionopsd.video.wan_policy import attach_lora, ema_adapter_
+from ml_collections import config_flags
+from peft import get_peft_model_state_dict
 
 FLAGS = flags.FLAGS
 config_flags.DEFINE_config_file("config", "config/wan_video.py")
@@ -52,6 +53,15 @@ def _prompt_seed(prompt: str) -> int:
 
 def main(_):
     cfg = FLAGS.config
+    os.makedirs(cfg.logdir, exist_ok=True)
+    wandb.init(
+        project="diffusionopsd",
+        name=cfg.run_name or f"wan22-opsd-{os.environ.get('SLURM_JOB_ID', 'local')}",
+        config=cfg.to_dict(),
+        dir=cfg.logdir,
+        mode="offline",
+    )
+    install_wandb_jsonl_tee(wandb, os.path.join(cfg.logdir, "metrics.jsonl"))
     dev = "cuda:0"
     model_path = os.path.expandvars(cfg.pretrained.model)
     pipe = WanPipeline.from_pretrained(
@@ -237,19 +247,22 @@ def main(_):
             with torch.no_grad():
                 for pb, pp in zip(behavior.parameters(), policy.parameters()):
                     pb.mul_(0.99).add_(pp.detach(), alpha=0.01)
-        print(
-            json.dumps(
-                {
-                    "epoch": epoch,
-                    "n_rollouts": len(tuples),
-                    "n_kept": len(kept),
-                    "mean_r": sum(t["r"] for t in tuples) / len(tuples),
-                    "mean_w": sum(t["w"] for t in tuples) / len(tuples),
-                    "frac_motion_masked": sum(t["m"] < tau_motion for t in tuples) / len(tuples),
-                    "frac_quality_masked": sum(t["p_q"] < cfg.gates.tau_q for t in tuples) / len(tuples),
-                }
-            )
-        )
+        record = {
+            "epoch": epoch,
+            "optimizer_updates": epoch + 1,
+            "grad_norm": float(grad_norm),
+            "n_rollouts": len(tuples),
+            "n_kept": len(kept),
+            "mean_r": sum(t["r"] for t in tuples) / len(tuples),
+            "mean_w": sum(t["w"] for t in tuples) / len(tuples),
+            "frac_motion_masked": sum(t["m"] < tau_motion for t in tuples) / len(tuples),
+            "frac_quality_masked": sum(t["p_q"] < cfg.gates.tau_q for t in tuples) / len(tuples),
+            "tau_id": float(tau_id),
+            "tau_motion": float(tau_motion),
+            "tau_q": float(cfg.gates.tau_q),
+        }
+        print(json.dumps(record), flush=True)
+        wandb.log(record, step=epoch + 1)
         if (epoch + 1) % cfg.save_freq == 0:
             os.makedirs(cfg.logdir, exist_ok=True)
             if cfg.use_lora:
@@ -259,6 +272,7 @@ def main(_):
             checkpoint_path = os.path.join(cfg.logdir, f"policy_{epoch+1}.pt")
             torch.save(state, checkpoint_path)
             print(json.dumps({"checkpoint_saved": checkpoint_path}), flush=True)
+    wandb.finish()
 
 
 if __name__ == "__main__":
