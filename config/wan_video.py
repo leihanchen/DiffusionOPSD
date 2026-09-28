@@ -37,5 +37,11 @@ def get_config():
     config.prompt_fn = "text_file"
     config.prompt_fn_kwargs = {"path": "data/video_motion/train.txt"}
     config.eval_prompts = "data/video_motion/test.txt"
+    # Interval in completed optimizer updates; 0 disables in-training evaluation.
+    config.eval_freq = 0
+    config.eval_num_prompts = 8
+    config.eval_seed = 0
+    config.eval_num_videos = 2
+    config.eval_video_fps = 8
     config.use_lora = False
     return config

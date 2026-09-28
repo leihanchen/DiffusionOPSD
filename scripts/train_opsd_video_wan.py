@@ -31,6 +31,7 @@ from diffusionopsd.video.gates import effective_weight, identity_keep, percentil
 from diffusionopsd.video.geo_reward import GeoReward
 from diffusionopsd.video.opa_video import opa_tr_step_nd
 from diffusionopsd.video.quality_judge import load_video_reward
+from diffusionopsd.video.training_eval import EvaluationMonitor, evaluation_due
 from diffusionopsd.video.wan_clean_output import WanRollout, clean_output
 from diffusionopsd.video.wan_policy import attach_lora, ema_adapter_
 from ml_collections import config_flags
@@ -51,8 +52,20 @@ def _prompt_seed(prompt: str) -> int:
     return int(hashlib.sha256(prompt.encode()).hexdigest()[:8], 16)
 
 
+def _log_record(record, videos=()):
+    print(json.dumps(record), flush=True)
+    payload = dict(record)
+    if videos:
+        payload["eval/videos"] = [
+            wandb.Video(video["path"], format="mp4", caption=f"{video['prompt']} | seed={video['seed']}")
+            for video in videos
+        ]
+    wandb.log(payload, step=record["optimizer_updates"])
+
+
 def main(_):
     cfg = FLAGS.config
+    evaluator = EvaluationMonitor(cfg)  # Validate settings and prompts before loading models.
     os.makedirs(cfg.logdir, exist_ok=True)
     wandb.init(
         project="diffusionopsd",
@@ -133,6 +146,12 @@ def main(_):
     )
     print(json.dumps({"tau_id": tau_id, "tau_motion": tau_motion, "tau_q": cfg.gates.tau_q}))
 
+    if evaluation_due(0, cfg.num_epochs, cfg.eval_freq):
+        # Calibration references are cached on CPU; release its final GPU tensors.
+        rec = pe = ne = latents = clip = out = None
+        metrics, videos = evaluator.evaluate(pipe, policy, roll_old, reward, judge, 0)
+        _log_record({"optimizer_updates": 0, **metrics}, videos)
+
     for epoch in range(cfg.num_epochs):
         batch_prompts = random.sample(prompts, cfg.sample.num_batches_per_epoch)
         tuples = []
@@ -211,6 +230,7 @@ def main(_):
             pipe.transformer = policy
         policy.train()
         opt.zero_grad()
+        distillation_loss_sum = torch.zeros((), device=dev)
         for t in kept:
             rec = t["rec"]
             with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -230,6 +250,7 @@ def main(_):
                 torch.tensor([t["w"]], device=dev),
                 cfg.beta,
             ).mean()
+            distillation_loss_sum += loss.detach()
             (loss * cfg.train.adv_clip_max / max(len(kept), 1)).backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(trainable, cfg.train.max_grad_norm)
         if cfg.debug and (not torch.isfinite(grad_norm) or grad_norm <= 0):
@@ -247,9 +268,15 @@ def main(_):
             with torch.no_grad():
                 for pb, pp in zip(behavior.parameters(), policy.parameters()):
                     pb.mul_(0.99).add_(pp.detach(), alpha=0.01)
+        # Average over the rollouts actually used in backward, not all sampled rollouts.
+        mean_distillation_loss = float(distillation_loss_sum / len(kept)) if kept else None
         record = {
             "epoch": epoch,
             "optimizer_updates": epoch + 1,
+            "train/rl_distillation_loss": mean_distillation_loss,
+            "train/optimization_loss": (
+                mean_distillation_loss * cfg.train.adv_clip_max if kept else None
+            ),
             "grad_norm": float(grad_norm),
             "n_rollouts": len(tuples),
             "n_kept": len(kept),
@@ -261,8 +288,6 @@ def main(_):
             "tau_motion": float(tau_motion),
             "tau_q": float(cfg.gates.tau_q),
         }
-        print(json.dumps(record), flush=True)
-        wandb.log(record, step=epoch + 1)
         if (epoch + 1) % cfg.save_freq == 0:
             os.makedirs(cfg.logdir, exist_ok=True)
             if cfg.use_lora:
@@ -272,6 +297,19 @@ def main(_):
             checkpoint_path = os.path.join(cfg.logdir, f"policy_{epoch+1}.pt")
             torch.save(state, checkpoint_path)
             print(json.dumps({"checkpoint_saved": checkpoint_path}), flush=True)
+            del state
+        videos = []
+        if evaluation_due(epoch + 1, cfg.num_epochs, cfg.eval_freq):
+            # The update is finished. Release rollout/target tensors and gradient
+            # buffers before generating evaluation clips on the same devices.
+            opt.zero_grad(set_to_none=True)
+            tuples.clear()
+            kept.clear()
+            t = rec = rec_ref = pe = ne = latents = clip = out = s_id = None
+            y0 = yg = g0 = y_theta = v_theta = loss = None
+            metrics, videos = evaluator.evaluate(pipe, policy, roll_old, reward, judge, epoch + 1)
+            record.update(metrics)
+        _log_record(record, videos)
     wandb.finish()
 
 

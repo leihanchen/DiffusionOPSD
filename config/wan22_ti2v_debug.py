@@ -11,4 +11,5 @@ def get_config():
     config.gates.calib_prompts = 2
     config.num_epochs = 4
     config.save_freq = 1
+    config.eval_freq = 2
     return config

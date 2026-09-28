@@ -120,4 +120,6 @@ apptainer exec --nv "${APPTAINER_BINDS[@]}" --pwd "${PWD}" \
   --env GIT_TERMINAL_PROMPT=0 \
   "${SIF}" \
   python scripts/train_opsd_video_wan.py --config config/wan22_ti2v_debug.py \
-    --config.logdir="${REPO}/logs/wan22-debug-${SLURM_JOB_ID}"
+    --config.logdir="${REPO}/logs/wan22-debug-${SLURM_JOB_ID}" \
+    --config.eval_freq=2 \
+    --config.eval_num_prompts=2
