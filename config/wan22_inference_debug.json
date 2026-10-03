@@ -1,0 +1,7 @@
+{
+  "height": 704,
+  "width": 1280,
+  "num_frames": 121,
+  "num_steps": 50,
+  "guidance_scale": 5.0
+}
