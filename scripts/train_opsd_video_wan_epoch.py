@@ -299,6 +299,11 @@ def main(_):
         prompt = prompts[index]
         policy.set_adapter("old")
         tuples = _sample_local(pipe, roll, reward, judge, cfg, prompt, index, nonce, refs)
+        # VideoReward is not used by the differentiable geometry target. Move its
+        # frozen weights off the scorer GPU before WAFT recomputes in backward.
+        judge.to("cpu")
+        with torch.cuda.device(cfg.judge.device):
+            torch.cuda.empty_cache()
         gathered = [None] * world
         dist.all_gather_object(gathered, [(t["prompt"], t["r"], t["m"], t["p_q"]) for t in tuples])
         sample_seconds = time.monotonic() - update_start
@@ -317,6 +322,7 @@ def main(_):
         target_start = time.monotonic()
         local_kept, local_loss = _targets_and_gradients(tuples, weight_box[0][rank], roll, reward,
                                                          policy, opt, cfg, tau_id)
+        judge.to(cfg.judge.device)
         target_seconds = time.monotonic() - target_start
         optimizer_start = time.monotonic()
         counts = torch.tensor([local_kept, local_loss, sum(t["r"] for t in tuples),

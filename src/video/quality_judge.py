@@ -44,6 +44,13 @@ class VideoRewardJudge:
         """Probability-shaped score that clip_a is at least as good as clip_b on VQ and MQ."""
         return gap_to_probability(quality_gap(self.score(clip_a, prompt), self.score(clip_b, prompt)))
 
+    def to(self, device: str):
+        """Move the frozen judge between GPU scoring and CPU storage."""
+        inferencer = self.scorer.inferencer
+        inferencer.model.to(device)
+        inferencer.device = device
+        return self
+
 
 def _to_pil(clip: torch.Tensor) -> list:
     """clip [T,3,H,W] float [0,1] -> RGB PIL frames. VideoAlign accepts a list of images as a video."""

@@ -35,6 +35,15 @@ def test_p_win_prefers_the_higher_scoring_clip():
     assert abs(judge.p_win(bright, bright, "a cat walking") - 0.5) < 1e-5
 
 
+def test_frozen_judge_updates_model_and_input_device_together():
+    inferencer = types.SimpleNamespace(model=torch.nn.Linear(1, 1).eval(), device="cuda:1")
+    scorer = types.SimpleNamespace(inferencer=inferencer)
+    judge = VideoRewardJudge(scorer)
+    assert judge.to("cpu") is judge
+    assert inferencer.device == "cpu"
+    assert next(inferencer.model.parameters()).device.type == "cpu"
+
+
 @pytest.mark.parametrize("fail_import", [False, True])
 def test_videoalign_imports_restore_existing_utils(tmp_path, monkeypatch, fail_import):
     from diffusionopsd.video.quality_judge import _videoalign_import_scope
