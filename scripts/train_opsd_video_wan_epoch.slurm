@@ -60,7 +60,8 @@ srun --ntasks=4 --ntasks-per-node=1 --kill-on-bad-exit=1 \
     --env "MASTER_ADDR=$MASTER_ADDR" --env "MASTER_PORT=$MASTER_PORT" \
     "$SIF" python scripts/train_opsd_video_wan_epoch.py \
       --config config/wan22_ti2v_epoch.py \
-      --config.logdir="$RUN_DIR" --job_budget_hours="$JOB_BUDGET_HOURS"
+      --config.logdir="$RUN_DIR" --job_budget_hours="$JOB_BUDGET_HOURS" \
+      --max_updates_this_job="${WAN_EPOCH_MAX_UPDATES:-0}"
 RESULT="$RUN_DIR/job_${SLURM_JOB_ID}.json"
 [[ -f "$RESULT" ]] || { echo "Missing completed-job result: $RESULT" >&2; exit 1; }
 STATUS="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$RESULT")"

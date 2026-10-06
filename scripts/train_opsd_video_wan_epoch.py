@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import hashlib
+import faulthandler
 import json
 import os
 import random
 import resource
+import socket
 import sys
 import time
 from datetime import timedelta
@@ -47,6 +49,21 @@ from diffusionopsd.video.wan_policy import attach_lora, ema_adapter_
 FLAGS = flags.FLAGS
 config_flags.DEFINE_config_file("config", "config/wan22_ti2v_epoch.py")
 flags.DEFINE_float("job_budget_hours", 20.0, "Stop starting updates within the 24-hour allocation")
+flags.DEFINE_float("distributed_timeout_minutes", 30.0, "Timeout for a distributed collective")
+flags.DEFINE_integer("max_updates_this_job", 0, "Stop after this many new updates; zero uses the time budget")
+
+
+def _trace(stage):
+    print(json.dumps({"event": "progress", "stage": stage, "rank": os.environ.get("SLURM_PROCID"),
+                      "host": socket.gethostname(), "time": time.time(),
+                      "cuda_device": torch.cuda.current_device() if torch.cuda.is_initialized() else None}),
+          flush=True)
+
+
+def _barrier(stage):
+    _trace(f"{stage}:enter")
+    dist.barrier(device_ids=[0])
+    _trace(f"{stage}:exit")
 
 
 def _hash(data):
@@ -199,14 +216,24 @@ def _targets_and_gradients(tuples, weights, roll, reward, policy, opt, cfg, tau_
 
 def main(_):
     cfg = FLAGS.config
+    if FLAGS.max_updates_this_job < 0 or FLAGS.distributed_timeout_minutes <= 0:
+        raise ValueError("Update limit must be nonnegative and distributed timeout must be positive")
     rank, world = int(os.environ["SLURM_PROCID"]), int(os.environ["SLURM_NTASKS"])
     if world != 4 or cfg.sample.num_batches_per_epoch != world or cfg.sample.num_image_per_prompt != 4:
         raise ValueError("This preset requires four workers, one prompt and four rollouts per worker")
     if cfg.num_epochs != 50 or cfg.save_freq != 50 or cfg.eval_freq != 25 or not cfg.use_lora:
         raise ValueError("Expected 50-update Wan2.2 LoRA preset with evaluation every 25")
     torch.cuda.set_device(0)
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(300, repeat=True)
+    _trace("process_group:enter")
     # Rank 0 performs calibration and video evaluation while peers wait.
-    dist.init_process_group("nccl", rank=rank, world_size=world, timeout=timedelta(hours=6))
+    # Every node runs one worker with three GPUs. Global rank is not its local
+    # communication GPU index, including when resume skips the adapter broadcast.
+    dist.init_process_group("nccl", rank=rank, world_size=world,
+                            timeout=timedelta(minutes=FLAGS.distributed_timeout_minutes),
+                            device_id=torch.device("cuda:0"))
+    _trace("process_group:exit")
     started = time.monotonic()
     run_dir = Path(cfg.logdir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -218,14 +245,18 @@ def main(_):
         raise ValueError(f"Expected 200 training prompts, got {len(prompts)}")
     evaluator = EvaluationMonitor(cfg) if rank == 0 else None
     state_path = run_dir / "training_state.pt"
+    _trace("resume_checkpoint:enter")
     state = load_checkpoint(state_path, prompt_hash, config_hash) if state_path.exists() else None
+    _trace("resume_checkpoint:exit")
     if rank == 0:
         wandb.init(project="diffusionopsd", group=run_dir.name,
                    name=f"{run_dir.name}-job-{os.environ['SLURM_JOB_ID']}", dir=str(run_dir),
                    mode="offline", config=cfg.to_dict())
         install_wandb_jsonl_tee(wandb, run_dir / "metrics.jsonl", durable=True, strict=True)
     model_path = os.path.expandvars(cfg.pretrained.model)
+    _trace("wan_model:enter")
     pipe = WanPipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16, local_files_only=True).to("cuda:0")
+    _trace("wan_model:exit")
     pipe.vae.requires_grad_(False).to(cfg.vae_device)
     pipe.text_encoder.requires_grad_(False)
     require_expand_timesteps(pipe, model_path)
@@ -233,19 +264,25 @@ def main(_):
     pipe.transformer.enable_gradient_checkpointing()
     policy = attach_lora(pipe.transformer, cfg.train.lora_path)
     pipe.transformer = policy
+    _trace("adapter_state:enter")
     if state is None:
         _broadcast_adapter(policy)
     else:
         _load_adapter(policy, state)
+    _trace("adapter_state:exit")
     trainable = [p for p in policy.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(trainable, lr=cfg.train.learning_rate, weight_decay=cfg.train.adam_weight_decay)
     if state is not None:
         opt.load_state_dict(state["optimizer"])
     roll = WanRollout(pipe, cfg.sample.num_steps, cfg.sample.guidance_scale,
                       offload_vae_activations=cfg.offload_vae_activations)
+    _trace("geometry_models:enter")
     reward = GeoReward(load_depth_anything3(cfg.reward_device), load_waft(cfg.reward_device),
                        load_dinov2(cfg.reward_device)).requires_grad_(False)
+    _trace("geometry_models:exit")
+    _trace("quality_model:enter")
     judge = load_video_reward(cfg.judge.device, num_frames=cfg.judge.num_frames)
+    _trace("quality_model:exit")
     tracker = PerPromptStatTracker(cfg.sample.global_std) if rank == 0 else None
     if state is None:
         if rank == 0:
@@ -273,23 +310,31 @@ def main(_):
             tracker.stats = state["tracker_stats"]
             tracker.history_prompts = {hash(prompt) for prompt in tracker.stats}
             evaluator.baseline = state["eval_baseline"]
+        _trace("rng_restore:enter")
         _restore_rng(state["rng_states"][rank])
+        _trace("rng_restore:exit")
     if state is None:
         rng_states = [None] * world
         dist.all_gather_object(rng_states, _rng_state())
     if rank == 0 and state is None:
         _save_state(state_path, policy, opt, tracker, evaluator, prompt_hash, config_hash,
                     nonce, order, refs, tau_id, tau_motion, completed, max_update_seconds, rng_states)
-    dist.barrier()
+    _barrier("startup_barrier")
     del state
+    initial_completed = completed
     while completed < cfg.num_epochs:
         if rank == 0:
             can_start = should_start_update(completed, cfg.num_epochs, time.monotonic() - started,
                                             max_update_seconds, FLAGS.job_budget_hours * 3600)
+            if FLAGS.max_updates_this_job and completed - initial_completed >= FLAGS.max_updates_this_job:
+                can_start = False
         else:
             can_start = None
         decision = [can_start]
+        _trace("update_decision:enter")
         dist.broadcast_object_list(decision, src=0)
+        _trace("update_decision:exit")
+        faulthandler.cancel_dump_traceback_later()
         if not decision[0]:
             break
         update_start = time.monotonic()
@@ -298,7 +343,9 @@ def main(_):
         index = split_update(order, completed, rank, world)[0]
         prompt = prompts[index]
         policy.set_adapter("old")
+        _trace(f"update_{completed + 1}:sampling:enter")
         tuples = _sample_local(pipe, roll, reward, judge, cfg, prompt, index, nonce, refs)
+        _trace(f"update_{completed + 1}:sampling:exit")
         # VideoReward is not used by the differentiable geometry target. Move its
         # frozen weights off the scorer GPU before WAFT recomputes in backward.
         judge.to("cpu")
@@ -320,8 +367,10 @@ def main(_):
         weight_box = [weight_groups]
         dist.broadcast_object_list(weight_box, src=0)
         target_start = time.monotonic()
+        _trace(f"update_{completed + 1}:target_gradients:enter")
         local_kept, local_loss = _targets_and_gradients(tuples, weight_box[0][rank], roll, reward,
                                                          policy, opt, cfg, tau_id)
+        _trace(f"update_{completed + 1}:target_gradients:exit")
         judge.to(cfg.judge.device)
         target_seconds = time.monotonic() - target_start
         optimizer_start = time.monotonic()
@@ -383,7 +432,7 @@ def main(_):
         if rank == 0:
             _save_state(state_path, policy, opt, tracker, evaluator, prompt_hash, config_hash,
                         nonce, order, refs, tau_id, tau_motion, completed, max_update_seconds, rng_states)
-        dist.barrier()
+        _barrier(f"update_{completed}:checkpoint_barrier")
     if rank == 0:
         result = {"status": "complete" if completed == cfg.num_epochs else "continue",
                   "completed_updates": completed, "total_updates": cfg.num_epochs,
@@ -391,7 +440,7 @@ def main(_):
         (run_dir / f"job_{os.environ['SLURM_JOB_ID']}.json").write_text(json.dumps(result, indent=2) + "\n")
         wandb.finish()
         print(json.dumps(result), flush=True)
-    dist.barrier()
+    _barrier("shutdown_barrier")
     dist.destroy_process_group()
 
 
