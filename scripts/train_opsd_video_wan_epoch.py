@@ -49,14 +49,14 @@ from diffusionopsd.video.wan_policy import attach_lora, ema_adapter_
 FLAGS = flags.FLAGS
 config_flags.DEFINE_config_file("config", "config/wan22_ti2v_epoch.py")
 flags.DEFINE_float("job_budget_hours", 20.0, "Stop starting updates within the 24-hour allocation")
-flags.DEFINE_float("distributed_timeout_minutes", 30.0, "Timeout for a distributed collective")
+flags.DEFINE_float("distributed_timeout_minutes", 180.0, "Timeout for a distributed collective")
 flags.DEFINE_integer("max_updates_this_job", 0, "Stop after this many new updates; zero uses the time budget")
 
 
-def _trace(stage):
+def _trace(stage, **details):
     print(json.dumps({"event": "progress", "stage": stage, "rank": os.environ.get("SLURM_PROCID"),
                       "host": socket.gethostname(), "time": time.time(),
-                      "cuda_device": torch.cuda.current_device() if torch.cuda.is_initialized() else None}),
+                      "cuda_device": torch.cuda.current_device() if torch.cuda.is_initialized() else None, **details}),
           flush=True)
 
 
@@ -180,28 +180,40 @@ def _targets_and_gradients(tuples, weights, roll, reward, policy, opt, cfg, tau_
         return reward(roll.decode01(latents).to(cfg.reward_device)).geo.to(latents.device)
 
     kept = []
-    for sample, weight in zip(tuples, weights):
+    for sample_index, (sample, weight) in enumerate(zip(tuples, weights)):
+        stage = f"target_sample_{sample_index}"
+        _trace(f"{stage}:identity:enter")
         rec = sample["rec"]
         sigma = torch.tensor([rec.sigma_q], device="cuda:0")
         y0 = clean_output(rec.z_q, rec.v_old_q, sigma).float()
         with torch.no_grad():
             s_id = reward(roll.decode01(y0).to(cfg.reward_device)).s_id
-        if not bool(identity_keep(s_id, tau_id).all()):
+        keep = bool(identity_keep(s_id, tau_id).all())
+        _trace(f"{stage}:identity:exit", kept=keep, identity_score=s_id.detach().cpu().tolist())
+        if not keep:
             continue
+        _trace(f"{stage}:first_gradient:enter")
         yg = y0.clone().requires_grad_(True)
         (g0,) = torch.autograd.grad(r_geo(yg).sum(), yg)
+        _trace(f"{stage}:first_gradient:exit")
         sample["y0"] = y0
+        _trace(f"{stage}:positive_target:enter")
         sample["y_plus"] = opa_tr_step_nd(y0, r_geo, cfg.opa.rho, cfg.opa.n_ascent,
                                            cfg.opa.eta, +1.0, first_grad=g0)
+        _trace(f"{stage}:positive_target:exit")
+        _trace(f"{stage}:negative_target:enter")
         sample["y_minus"] = opa_tr_step_nd(y0, r_geo, cfg.opa.rho, cfg.opa.n_ascent,
                                             cfg.opa.eta, -1.0, first_grad=g0)
+        _trace(f"{stage}:negative_target:exit")
         sample["weight"] = weight
         kept.append(sample)
     policy.set_adapter("default")
     policy.train()
     opt.zero_grad(set_to_none=True)
     local_loss = 0.0
-    for sample in kept:
+    _trace("policy_gradients:enter", retained_rollouts=len(kept))
+    for sample_index, sample in enumerate(kept):
+        _trace(f"policy_sample_{sample_index}:enter")
         rec = sample["rec"]
         with torch.autocast("cuda", dtype=torch.bfloat16):
             velocity = roll.velocity(rec.z_q, torch.tensor(rec.sigma_q, device="cuda:0"),
@@ -211,6 +223,8 @@ def _targets_and_gradients(tuples, weights, roll, reward, policy, opt, cfg, tau_
                            torch.tensor([sample["weight"]], device="cuda:0"), cfg.beta).mean()
         local_loss += float(loss.detach())
         (loss * cfg.train.adv_clip_max).backward()
+        _trace(f"policy_sample_{sample_index}:exit", loss=float(loss.detach()))
+    _trace("policy_gradients:exit", retained_rollouts=len(kept))
     return len(kept), local_loss
 
 
@@ -225,7 +239,7 @@ def main(_):
         raise ValueError("Expected 50-update Wan2.2 LoRA preset with evaluation every 25")
     torch.cuda.set_device(0)
     faulthandler.enable()
-    faulthandler.dump_traceback_later(300, repeat=True)
+    faulthandler.dump_traceback_later(600, repeat=True)
     _trace("process_group:enter")
     # Rank 0 performs calibration and video evaluation while peers wait.
     # Every node runs one worker with three GPUs. Global rank is not its local
@@ -334,7 +348,6 @@ def main(_):
         _trace("update_decision:enter")
         dist.broadcast_object_list(decision, src=0)
         _trace("update_decision:exit")
-        faulthandler.cancel_dump_traceback_later()
         if not decision[0]:
             break
         update_start = time.monotonic()
@@ -378,7 +391,9 @@ def main(_):
                                sum(weight_box[0][rank]), sum(t["m"] < tau_motion for t in tuples),
                                sum(t["p_q"] < cfg.gates.tau_q for t in tuples)],
                               device="cuda:0", dtype=torch.float64)
+        _trace("update_counts:enter", retained_rollouts=local_kept)
         dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+        _trace("update_counts:exit")
         total_kept = int(counts[0].item())
         if total_kept == 0:
             raise RuntimeError("No retained rollout in global update")
@@ -442,6 +457,7 @@ def main(_):
         print(json.dumps(result), flush=True)
     _barrier("shutdown_barrier")
     dist.destroy_process_group()
+    faulthandler.cancel_dump_traceback_later()
 
 
 def _save_state(path, policy, opt, tracker, evaluator, prompt_hash, config_hash,

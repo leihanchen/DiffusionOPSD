@@ -51,7 +51,7 @@ else
 fi
 BINDS+=(--bind "$REPO/src:/opt/venv/lib/python3.12/site-packages/diffusionopsd")
 echo "Wan2.2 epoch run=$RUN_ID job=$SLURM_JOB_ID nodes=$SLURM_JOB_NODELIST master=$MASTER_ADDR budget_hours=$JOB_BUDGET_HOURS chain_jobs=$CHAIN_JOBS"
-srun --ntasks=4 --ntasks-per-node=1 --kill-on-bad-exit=1 \
+srun --label --ntasks=4 --ntasks-per-node=1 --kill-on-bad-exit=1 \
   apptainer exec --nv "${BINDS[@]}" --pwd "$REPO" \
     --env PYTHONNOUSERSITE=1 --env WANDB_MODE=offline --env "WANDB_DIR=$WANDB_DIR" \
     --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 --env HF_DATASETS_OFFLINE=1 \
@@ -61,6 +61,7 @@ srun --ntasks=4 --ntasks-per-node=1 --kill-on-bad-exit=1 \
     "$SIF" python scripts/train_opsd_video_wan_epoch.py \
       --config config/wan22_ti2v_epoch.py \
       --config.logdir="$RUN_DIR" --job_budget_hours="$JOB_BUDGET_HOURS" \
+      --distributed_timeout_minutes="${WAN_EPOCH_DISTRIBUTED_TIMEOUT_MINUTES:-180}" \
       --max_updates_this_job="${WAN_EPOCH_MAX_UPDATES:-0}"
 RESULT="$RUN_DIR/job_${SLURM_JOB_ID}.json"
 [[ -f "$RESULT" ]] || { echo "Missing completed-job result: $RESULT" >&2; exit 1; }
