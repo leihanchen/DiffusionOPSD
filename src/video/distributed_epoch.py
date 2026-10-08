@@ -11,6 +11,19 @@ import torch
 import torch.distributed as dist
 
 
+def active_cuda_devices(cfg, available_count: int) -> tuple[int, ...]:
+    """Validate configured model placement and return each used GPU once."""
+    devices = {0}  # Policy and NCCL always use local GPU 0.
+    for placement in (cfg.vae_device, cfg.reward_device, cfg.judge.device):
+        device = torch.device(placement)
+        if device.type != "cuda" or device.index is None:
+            raise ValueError(f"Expected explicit CUDA device, got {placement}")
+        devices.add(device.index)
+    if max(devices) >= available_count:
+        raise ValueError(f"Configured GPUs {sorted(devices)} exceed {available_count} visible CUDA devices")
+    return tuple(sorted(devices))
+
+
 def prompt_schedule(prompts: list[str], nonce: int, workers: int) -> list[int]:
     if not prompts or len(prompts) % workers:
         raise ValueError("Prompt count must be nonzero and divisible by worker count")

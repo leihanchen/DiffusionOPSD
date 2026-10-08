@@ -77,3 +77,31 @@ def test_four_worker_gradients_match_global_mean(tmp_path):
     for rank in range(4):
         gradient = torch.load(tmp_path / f"gradient_{rank}.pt", weights_only=True)
         assert torch.equal(gradient, torch.tensor([2.5]))
+
+
+def test_active_cuda_devices_deduplicates_shared_vae_and_rejects_missing_gpu():
+    from types import SimpleNamespace
+
+    from diffusionopsd.video.distributed_epoch import active_cuda_devices
+
+    cfg = SimpleNamespace(vae_device='cuda:1', reward_device='cuda:1',
+                          judge=SimpleNamespace(device='cuda:1'))
+    assert active_cuda_devices(cfg, available_count=2) == (0, 1)
+    cfg.vae_device = 'cuda:2'
+    assert active_cuda_devices(cfg, available_count=3) == (0, 1, 2)
+    with pytest.raises(ValueError, match='visible'):
+        active_cuda_devices(cfg, available_count=2)
+    cfg.vae_device = 'cpu'
+    with pytest.raises(ValueError, match='explicit CUDA'):
+        active_cuda_devices(cfg, available_count=2)
+
+
+def test_two_gpu_epoch_preset_preserves_training_settings():
+    from config.wan22_ti2v_epoch import get_config as three_gpu_config
+    from config.wan22_ti2v_epoch_two_gpu import get_config as two_gpu_config
+
+    original = three_gpu_config().to_dict()
+    shared = two_gpu_config().to_dict()
+    assert shared['vae_device'] == shared['reward_device'] == shared['judge']['device'] == 'cuda:1'
+    shared['vae_device'] = original['vae_device']
+    assert shared == original

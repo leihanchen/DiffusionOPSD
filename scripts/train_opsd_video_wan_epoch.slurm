@@ -19,7 +19,8 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:?Submit from repository root}"
 REPO="$PWD"
 RUN_ID="${WAN_EPOCH_RUN_ID:-${SLURM_JOB_ID}}"
-RUN_DIR="${REPO}/logs/wan22-epoch-${RUN_ID}"
+RUN_DIR="${REPO}/logs/${WAN_EPOCH_RUN_PREFIX:-wan22-epoch}-${RUN_ID}"
+CONFIG="${WAN_EPOCH_CONFIG:-config/wan22_ti2v_epoch.py}"
 JOB_BUDGET_HOURS="${WAN_EPOCH_JOB_BUDGET_HOURS:-20}"
 CHAIN_JOBS="${WAN_EPOCH_CHAIN_JOBS:-1}"
 SIF="${REPO}/containers/diffusionopsd.sif"
@@ -59,7 +60,7 @@ srun --label --ntasks=4 --ntasks-per-node=1 --kill-on-bad-exit=1 \
     --env "VIDEO_REWARD_CKPT_PATH=$VIDEO_REWARD_CKPT_PATH" --env "XDG_CACHE_HOME=$XDG_CACHE_HOME" \
     --env "MASTER_ADDR=$MASTER_ADDR" --env "MASTER_PORT=$MASTER_PORT" \
     "$SIF" python scripts/train_opsd_video_wan_epoch.py \
-      --config config/wan22_ti2v_epoch.py \
+      --config "$CONFIG" \
       --config.logdir="$RUN_DIR" --job_budget_hours="$JOB_BUDGET_HOURS" \
       --distributed_timeout_minutes="${WAN_EPOCH_DISTRIBUTED_TIMEOUT_MINUTES:-180}" \
       --max_updates_this_job="${WAN_EPOCH_MAX_UPDATES:-0}"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ruff: noqa: E402
-"""Four-worker, one-pass Wan2.2 OPSD trainer on four three-A100 nodes."""
+"""Four-worker, one-pass Wan2.2 OPSD trainer with configured model placement."""
 from __future__ import annotations
 
 import hashlib
@@ -33,7 +33,7 @@ from diffusionopsd.metrics import install_wandb_jsonl_tee
 from diffusionopsd.stat_tracking import PerPromptStatTracker
 from diffusionopsd.video.branch_loss import branch_loss
 from diffusionopsd.video.distributed_epoch import (
-    atomic_checkpoint, deterministic_seed, load_checkpoint, prompt_schedule,
+    active_cuda_devices, atomic_checkpoint, deterministic_seed, load_checkpoint, prompt_schedule,
     should_start_update, split_update, synchronize_gradients,
 )
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
@@ -237,17 +237,20 @@ def main(_):
         raise ValueError("This preset requires four workers, one prompt and four rollouts per worker")
     if cfg.num_epochs != 50 or cfg.save_freq != 50 or cfg.eval_freq != 25 or not cfg.use_lora:
         raise ValueError("Expected 50-update Wan2.2 LoRA preset with evaluation every 25")
+    devices = active_cuda_devices(cfg, torch.cuda.device_count())
     torch.cuda.set_device(0)
     faulthandler.enable()
     faulthandler.dump_traceback_later(600, repeat=True)
     _trace("process_group:enter")
     # Rank 0 performs calibration and video evaluation while peers wait.
-    # Every node runs one worker with three GPUs. Global rank is not its local
+    # Every node runs one worker. Global rank is not its local
     # communication GPU index, including when resume skips the adapter broadcast.
     dist.init_process_group("nccl", rank=rank, world_size=world,
                             timeout=timedelta(minutes=FLAGS.distributed_timeout_minutes),
                             device_id=torch.device("cuda:0"))
     _trace("process_group:exit")
+    _trace("model_placement", policy_device="cuda:0", vae_device=cfg.vae_device,
+           reward_device=cfg.reward_device, judge_device=cfg.judge.device, active_devices=devices)
     started = time.monotonic()
     run_dir = Path(cfg.logdir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -351,7 +354,7 @@ def main(_):
         if not decision[0]:
             break
         update_start = time.monotonic()
-        for device in range(3):
+        for device in devices:
             torch.cuda.reset_peak_memory_stats(device)
         index = split_update(order, completed, rank, world)[0]
         prompt = prompts[index]
@@ -405,7 +408,7 @@ def main(_):
         ema_adapter_(policy, src="default", dst="old", decay=0.99)
         opt.zero_grad(set_to_none=True)
         tuples.clear()
-        for device in range(3):
+        for device in devices:
             torch.cuda.synchronize(device)
         optimizer_seconds = time.monotonic() - optimizer_start
         local_duration = time.monotonic() - update_start
@@ -415,8 +418,10 @@ def main(_):
         dist.all_reduce(phase_times, op=dist.ReduceOp.MAX)
         completed += 1
         max_update_seconds = max(max_update_seconds or 0, float(timings.item()))
-        peaks = {f"gpu/{rank}/{device}/peak_allocated_bytes": torch.cuda.max_memory_allocated(device)
-                 for device in range(3)}
+        peaks = {f"gpu/{rank}/{device}/peak_{kind}_bytes": measure(device)
+                 for device in devices
+                 for kind, measure in (("allocated", torch.cuda.max_memory_allocated),
+                                       ("reserved", torch.cuda.max_memory_reserved))}
         peaks[f"worker/{rank}/host_peak_rss_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
         peak_list = [None] * world
         dist.all_gather_object(peak_list, peaks)
