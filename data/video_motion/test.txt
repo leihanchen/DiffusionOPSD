@@ -1,0 +1,64 @@
+[eval-01] Fixed subject: a chessboard with pieces mid-game. Camera executes a precise 90-degree pan left; walls must show consistent parallax.
+[eval-02] Evaluate 3D consistency: orbit a wind chime on a porch 270 degrees; occlusions must remain coherent.
+[eval-03] VBench-style dolly: push from 3m to 1m on a leather armchair in a reading nook; scale change must match perspective.
+[eval-04] WorldScore camera control: truck right 2m with a drone on a launch pad locked in frame center.
+[eval-05] Rigid scene: only the camera moves—pedestal up on a street lamp at dusk, no object motion.
+[eval-06] a cactus in desert sand translates left 40cm; camera locked on tripod; depth layers must separate cleanly.
+[eval-07] Combined motion: slow pan right while a red bicycle on a cobblestone street rotates 30° counterclockwise.
+[eval-08] Low-angle orbit of a stack of hardcover books by a window; ground plane must stay planar throughout.
+[eval-09] Fixed subject: a blue sedan parked at the curb. Camera executes a precise 90-degree pan left; walls must show consistent parallax.
+[eval-10] Evaluate 3D consistency: orbit a marble bust in a museum gallery 270 degrees; occlusions must remain coherent.
+[eval-11] VBench-style dolly: push from 3m to 1m on a glass aquarium with goldfish; scale change must match perspective.
+[eval-12] WorldScore camera control: truck right 2m with a fruit bowl on a kitchen island locked in frame center.
+[eval-13] Rigid scene: only the camera moves—pedestal up on a campfire ring in a forest clearing, no object motion.
+[eval-14] a grand piano in a concert hall translates left 40cm; camera locked on tripod; depth layers must separate cleanly.
+[eval-15] Combined motion: slow pan right while a pair of running shoes on tile rotates 30° counterclockwise.
+[eval-16] Low-angle orbit of a golden retriever in a sunny park; ground plane must stay planar throughout.
+[eval-17] Fixed subject: a vintage typewriter on a desk. Camera executes a precise 90-degree pan left; walls must show consistent parallax.
+[eval-18] Evaluate 3D consistency: orbit a steaming mug of coffee on a counter 270 degrees; occlusions must remain coherent.
+[eval-19] VBench-style dolly: push from 3m to 1m on a toy train on carpet; scale change must match perspective.
+[eval-20] WorldScore camera control: truck right 2m with a bicycle helmet on a bench locked in frame center.
+[eval-21] Rigid scene: only the camera moves—pedestal up on a snow globe on a shelf, no object motion.
+[eval-22] a rowboat tied to a dock translates left 40cm; camera locked on tripod; depth layers must separate cleanly.
+[eval-23] Combined motion: slow pan right while a laptop open on a cafe table rotates 30° counterclockwise.
+[eval-24] Low-angle orbit of a ceramic vase on a wooden table; ground plane must stay planar throughout.
+[eval-25] Fixed subject: a potted succulent on a balcony railing. Camera executes a precise 90-degree pan left; walls must show consistent parallax.
+[eval-26] Evaluate 3D consistency: orbit a chessboard with pieces mid-game 270 degrees; occlusions must remain coherent.
+[eval-27] VBench-style dolly: push from 3m to 1m on a wind chime on a porch; scale change must match perspective.
+[eval-28] WorldScore camera control: truck right 2m with a leather armchair in a reading nook locked in frame center.
+[eval-29] Rigid scene: only the camera moves—pedestal up on a drone on a launch pad, no object motion.
+[eval-30] a street lamp at dusk translates left 40cm; camera locked on tripod; depth layers must separate cleanly.
+[eval-31] Combined motion: slow pan right while a cactus in desert sand rotates 30° counterclockwise.
+[eval-32] Low-angle orbit of a red bicycle on a cobblestone street; ground plane must stay planar throughout.
+[eval-33] Fixed subject: a stack of hardcover books by a window. Camera executes a precise 90-degree pan left; walls must show consistent parallax.
+[eval-34] Evaluate 3D consistency: orbit a blue sedan parked at the curb 270 degrees; occlusions must remain coherent.
+[eval-35] VBench-style dolly: push from 3m to 1m on a marble bust in a museum gallery; scale change must match perspective.
+[eval-36] WorldScore camera control: truck right 2m with a glass aquarium with goldfish locked in frame center.
+[eval-37] Rigid scene: only the camera moves—pedestal up on a fruit bowl on a kitchen island, no object motion.
+[eval-38] a campfire ring in a forest clearing translates left 40cm; camera locked on tripod; depth layers must separate cleanly.
+[eval-39] Combined motion: slow pan right while a grand piano in a concert hall rotates 30° counterclockwise.
+[eval-40] Low-angle orbit of a pair of running shoes on tile; ground plane must stay planar throughout.
+[eval-41] Fixed subject: a golden retriever in a sunny park. Camera executes a precise 90-degree pan left; walls must show consistent parallax.
+[eval-42] Evaluate 3D consistency: orbit a vintage typewriter on a desk 270 degrees; occlusions must remain coherent.
+[eval-43] VBench-style dolly: push from 3m to 1m on a steaming mug of coffee on a counter; scale change must match perspective.
+[eval-44] WorldScore camera control: truck right 2m with a toy train on carpet locked in frame center.
+[eval-45] Rigid scene: only the camera moves—pedestal up on a bicycle helmet on a bench, no object motion.
+[eval-46] a snow globe on a shelf translates left 40cm; camera locked on tripod; depth layers must separate cleanly.
+[eval-47] Combined motion: slow pan right while a rowboat tied to a dock rotates 30° counterclockwise.
+[eval-48] Low-angle orbit of a laptop open on a cafe table; ground plane must stay planar throughout.
+[eval-49] Fixed subject: a ceramic vase on a wooden table. Camera executes a precise 90-degree pan left; walls must show consistent parallax.
+[eval-50] Evaluate 3D consistency: orbit a potted succulent on a balcony railing 270 degrees; occlusions must remain coherent.
+[eval-51] VBench-style dolly: push from 3m to 1m on a chessboard with pieces mid-game; scale change must match perspective.
+[eval-52] WorldScore camera control: truck right 2m with a wind chime on a porch locked in frame center.
+[eval-53] Rigid scene: only the camera moves—pedestal up on a leather armchair in a reading nook, no object motion.
+[eval-54] a drone on a launch pad translates left 40cm; camera locked on tripod; depth layers must separate cleanly.
+[eval-55] Combined motion: slow pan right while a street lamp at dusk rotates 30° counterclockwise.
+[eval-56] Low-angle orbit of a cactus in desert sand; ground plane must stay planar throughout.
+[eval-57] Fixed subject: a red bicycle on a cobblestone street. Camera executes a precise 90-degree pan left; walls must show consistent parallax.
+[eval-58] Evaluate 3D consistency: orbit a stack of hardcover books by a window 270 degrees; occlusions must remain coherent.
+[eval-59] VBench-style dolly: push from 3m to 1m on a blue sedan parked at the curb; scale change must match perspective.
+[eval-60] WorldScore camera control: truck right 2m with a marble bust in a museum gallery locked in frame center.
+[eval-61] Rigid scene: only the camera moves—pedestal up on a glass aquarium with goldfish, no object motion.
+[eval-62] a fruit bowl on a kitchen island translates left 40cm; camera locked on tripod; depth layers must separate cleanly.
+[eval-63] Combined motion: slow pan right while a campfire ring in a forest clearing rotates 30° counterclockwise.
+[eval-64] Low-angle orbit of a grand piano in a concert hall; ground plane must stay planar throughout.

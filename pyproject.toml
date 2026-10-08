@@ -52,7 +52,7 @@ Documentation = "https://diffusionopsd.github.io/"
 Repository = "https://github.com/worldbench/DiffusionOPSD"
 
 [tool.setuptools]
-packages = ["diffusionopsd", "diffusionopsd.diffusers_patch"]
+packages = ["diffusionopsd", "diffusionopsd.diffusers_patch", "diffusionopsd.video"]
 package-dir = {diffusionopsd = "src"}
 
 [tool.ruff]
