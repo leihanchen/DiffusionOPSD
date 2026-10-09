@@ -185,3 +185,12 @@ def test_training_continues_and_logs_offline_metrics_and_media(tmp_path, monkeyp
     assert len(list((tmp_path / 'eval').glob('*.mp4'))) == 6
     assert list((tmp_path / 'wandb').glob('offline-run-*/run-*.wandb'))
     assert len(list((tmp_path / 'wandb').glob('offline-run-*/files/media/videos/**/*.mp4'))) == 6
+
+
+def test_monitoring_interval_can_override_schedule_without_changing_config():
+    # A resume keeps its original config/hash while requesting closer observation.
+    assert [s for s in range(2, 7) if evaluation_due(s, 50, 25, override_freq=2)] == [2, 4, 6]
+    assert not evaluation_due(4, 50, 25)
+    assert evaluation_due(25, 50, 25, override_freq=0)
+    with pytest.raises(ValueError, match='nonnegative'):
+        evaluation_due(4, 50, 25, override_freq=-1)

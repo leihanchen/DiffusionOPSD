@@ -51,6 +51,9 @@ config_flags.DEFINE_config_file("config", "config/wan22_ti2v_epoch.py")
 flags.DEFINE_float("job_budget_hours", 20.0, "Stop starting updates within the 24-hour allocation")
 flags.DEFINE_float("distributed_timeout_minutes", 180.0, "Timeout for a distributed collective")
 flags.DEFINE_integer("max_updates_this_job", 0, "Stop after this many new updates; zero uses the time budget")
+flags.DEFINE_integer("monitor_eval_freq", 0, "Evaluation interval override; zero retains the checkpoint config")
+flags.DEFINE_bool("evaluate_on_resume", False, "Evaluate the loaded policy before further training")
+flags.DEFINE_integer("expected_resume_update", -1, "Require this checkpoint update; -1 permits any start")
 
 
 def _trace(stage, **details):
@@ -232,6 +235,8 @@ def main(_):
     cfg = FLAGS.config
     if FLAGS.max_updates_this_job < 0 or FLAGS.distributed_timeout_minutes <= 0:
         raise ValueError("Update limit must be nonnegative and distributed timeout must be positive")
+    if FLAGS.monitor_eval_freq < 0 or FLAGS.expected_resume_update < -1:
+        raise ValueError("Monitoring frequency must be nonnegative; expected resume update must be >= -1")
     rank, world = int(os.environ["SLURM_PROCID"]), int(os.environ["SLURM_NTASKS"])
     if world != 4 or cfg.sample.num_batches_per_epoch != world or cfg.sample.num_image_per_prompt != 4:
         raise ValueError("This preset requires four workers, one prompt and four rollouts per worker")
@@ -264,11 +269,20 @@ def main(_):
     state_path = run_dir / "training_state.pt"
     _trace("resume_checkpoint:enter")
     state = load_checkpoint(state_path, prompt_hash, config_hash) if state_path.exists() else None
+    if FLAGS.expected_resume_update >= 0 and (
+        state is None or state["next_update"] != FLAGS.expected_resume_update
+    ):
+        raise ValueError(f"Expected checkpoint at update {FLAGS.expected_resume_update}, "
+                         f"got {state['next_update'] if state else 'no checkpoint'}")
     _trace("resume_checkpoint:exit")
     if rank == 0:
         wandb.init(project="diffusionopsd", group=run_dir.name,
                    name=f"{run_dir.name}-job-{os.environ['SLURM_JOB_ID']}", dir=str(run_dir),
-                   mode="offline", config=cfg.to_dict())
+                   mode="offline", config={**cfg.to_dict(), "monitoring": {
+                       "eval_freq": FLAGS.monitor_eval_freq or cfg.eval_freq,
+                       "evaluate_on_resume": FLAGS.evaluate_on_resume,
+                       "expected_resume_update": FLAGS.expected_resume_update,
+                       "max_updates_this_job": FLAGS.max_updates_this_job}})
         install_wandb_jsonl_tee(wandb, run_dir / "metrics.jsonl", durable=True, strict=True)
     model_path = os.path.expandvars(cfg.pretrained.model)
     _trace("wan_model:enter")
@@ -330,6 +344,11 @@ def main(_):
         _trace("rng_restore:enter")
         _restore_rng(state["rng_states"][rank])
         _trace("rng_restore:exit")
+        if rank == 0 and FLAGS.evaluate_on_resume:
+            _trace("resume_evaluation:enter", optimizer_updates=completed)
+            metrics, videos = evaluator.evaluate(pipe, policy, roll, reward, judge, completed)
+            _log({"optimizer_updates": completed, **metrics}, videos)
+            _trace("resume_evaluation:exit", optimizer_updates=completed)
     if state is None:
         rng_states = [None] * world
         dist.all_gather_object(rng_states, _rng_state())
@@ -440,7 +459,7 @@ def main(_):
                       "train/optimizer_seconds": float(phase_times[2]),
                       **{key: value for group in peak_list for key, value in group.items()}}
             videos = []
-            if evaluation_due(completed, cfg.num_epochs, cfg.eval_freq):
+            if evaluation_due(completed, cfg.num_epochs, cfg.eval_freq, override_freq=FLAGS.monitor_eval_freq):
                 metrics, videos = evaluator.evaluate(pipe, policy, roll, reward, judge, completed)
                 record.update(metrics)
             _log(record, videos)

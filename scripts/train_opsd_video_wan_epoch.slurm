@@ -63,7 +63,10 @@ srun --label --ntasks=4 --ntasks-per-node=1 --kill-on-bad-exit=1 \
       --config "$CONFIG" \
       --config.logdir="$RUN_DIR" --job_budget_hours="$JOB_BUDGET_HOURS" \
       --distributed_timeout_minutes="${WAN_EPOCH_DISTRIBUTED_TIMEOUT_MINUTES:-180}" \
-      --max_updates_this_job="${WAN_EPOCH_MAX_UPDATES:-0}"
+      --max_updates_this_job="${WAN_EPOCH_MAX_UPDATES:-0}" \
+      --monitor_eval_freq="${WAN_EPOCH_MONITOR_EVAL_FREQ:-0}" \
+      --evaluate_on_resume="${WAN_EPOCH_EVALUATE_ON_RESUME:-false}" \
+      --expected_resume_update="${WAN_EPOCH_EXPECTED_RESUME_UPDATE:--1}"
 RESULT="$RUN_DIR/job_${SLURM_JOB_ID}.json"
 [[ -f "$RESULT" ]] || { echo "Missing completed-job result: $RESULT" >&2; exit 1; }
 STATUS="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$RESULT")"

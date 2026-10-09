@@ -15,7 +15,10 @@ from diffusionopsd.video.quality_judge import gap_to_probability, quality_gap
 from diffusionopsd.video.wan_geometry import latent_shape_from_pipe
 
 
-def evaluation_due(update: int, total_updates: int, frequency: int) -> bool:
+def evaluation_due(update: int, total_updates: int, frequency: int, *, override_freq: int = 0) -> bool:
+    if override_freq < 0:
+        raise ValueError("Evaluation frequency override must be nonnegative")
+    frequency = override_freq or frequency
     return frequency > 0 and (update == 0 or update % frequency == 0 or update == total_updates)
 
 
