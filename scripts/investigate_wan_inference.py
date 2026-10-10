@@ -12,8 +12,10 @@ from pathlib import Path
 
 from diffusionopsd.video.inference_investigation import (
     file_hash,
+    load_adapter_checkpoint,
     prepare_output,
     run_investigation,
+    selected_conditions,
     validate_adapter,
     write_json,
 )
@@ -25,6 +27,10 @@ def parse_args(argv=None):
     selected, _ = config_parser.parse_known_args(argv)
     p = argparse.ArgumentParser(description=__doc__, parents=[config_parser], allow_abbrev=False)
     p.add_argument("--policy", required=True, type=Path)
+    p.add_argument("--checkpoint-format", choices=("adapter", "training"), default="adapter",
+                   help="Use training only for trusted local full checkpoints (pickle)")
+    p.add_argument("--expected-update", type=int, help="Require this completed update in a training checkpoint")
+    p.add_argument("--sampler", choices=("both", "euler", "native"), default="both")
     p.add_argument("--output-dir", required=True, type=Path)
     p.add_argument("--model", default="${VIDEO_REWARD_CKPT_PATH}/Wan2.2-TI2V-5B-Diffusers")
     p.add_argument("--prompts", type=Path, default=Path("data/video_motion/test.txt"))
@@ -61,6 +67,8 @@ def parse_args(argv=None):
     a.config = a.config.resolve() if a.config is not None else None
     a.config_sha256 = config_sha256
     a.model = os.path.expandvars(a.model)
+    if a.expected_update is not None and (a.expected_update < 0 or a.checkpoint_format != "training"):
+        p.error("--expected-update requires --checkpoint-format training and a nonnegative update")
     if any(v <= 0 for v in [a.num_prompts, a.height, a.width, a.num_frames, a.num_steps, a.fps]):
         p.error("Counts, dimensions, steps, and FPS must be positive")
     if a.height % 32 or a.width % 32 or (a.num_frames - 1) % 4:
@@ -121,13 +129,21 @@ def main(argv=None):
                                     for p in sorted(Path(cfg.model).rglob("*.json"))},
             "precision": {"transformer": "bfloat16", "text_encoder": "bfloat16", "vae": "bfloat16",
                           "initial_latents": "float32"},
-            "initial_latents": [], "expected_videos": len(prompts) * len(cfg.seed_offsets) * 4,
+            "initial_latents": [], "conditions": selected_conditions(cfg.sampler),
+            "expected_videos": len(prompts) * len(cfg.seed_offsets) * len(selected_conditions(cfg.sampler)),
             "status": "running",
         }
+        state, checkpoint_metadata = load_adapter_checkpoint(cfg.policy, cfg.checkpoint_format, cfg.expected_update)
+        manifest["checkpoint"] = checkpoint_metadata
         write_json(output / "manifest.json", manifest)
-        run = wandb.init(project="diffusionopsd", name=f"wan22-inference-{os.environ.get('SLURM_JOB_ID', output.name)}",
+        run = wandb.init(project=os.environ.get("WANDB_PROJECT", "diffusionopsd"),
+                         entity=os.environ.get("WANDB_ENTITY"),
+                         name=f"wan22-inference-{os.environ.get('SLURM_JOB_ID', output.name)}",
                          dir=str(output), mode="offline", config={k: str(v) if isinstance(v, Path) else v
                                                                 for k, v in vars(cfg).items()})
+        run.config.update({"checkpoint": checkpoint_metadata, "checkpoint_sha256": manifest["checkpoint_sha256"]})
+        manifest["wandb"] = {"id": run.id, "entity": run.entity, "project": run.project}
+        write_json(output / "manifest.json", manifest)
         pipe = WanPipeline.from_pretrained(cfg.model, torch_dtype=torch.bfloat16, local_files_only=True)
         pipe.to(cfg.policy_device)
         pipe.vae.to(cfg.vae_device)
@@ -136,7 +152,6 @@ def main(argv=None):
             raise ValueError("Expected the checkpoint's UniPC scheduler")
         scheduler_config = dict(pipe.scheduler.config)
         policy = attach_lora(pipe.transformer, None)
-        state = torch.load(cfg.policy, map_location="cpu", weights_only=True)
         validate_adapter(get_peft_model_state_dict(policy, adapter_name="default"), state)
         set_peft_model_state_dict(policy, state, adapter_name="default")
         del state
@@ -151,6 +166,8 @@ def main(argv=None):
         manifest = json.loads((output / "manifest.json").read_text())
         manifest["status"] = "complete"
         write_json(output / "manifest.json", manifest)
+        for name in ("manifest.json", "summary.json", "samples.jsonl", "samples.csv"):
+            run.save(str(output / name), base_path=str(output), policy="now")
         run.finish()
     except Exception as exc:
         if not (output / "failure.json").exists():

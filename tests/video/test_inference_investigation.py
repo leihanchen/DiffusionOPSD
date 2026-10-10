@@ -171,6 +171,78 @@ def test_summary_arithmetic_and_prompt_weighting():
         inv.summarize(rows + rows[:1])
 
 
+def test_euler_summary_keeps_pairs_and_weights_prompts_equally():
+    rows = []
+    for prompt, seeds, delta in [(0, [0, 1000], 1), (1, [1], 3)]:
+        for seed in seeds:
+            for condition, value in [('A', 1), ('C', 1 + delta)]:
+                rows.append(dict(prompt_index=prompt, seed=seed, condition=condition,
+                                 **{k: value for k in inv.SCORES}))
+    summary = inv.summarize(rows, conditions=('A', 'C'))
+    assert set(summary['means']) == {'A', 'C'}
+    assert summary['differences']['C-A']['geo'] == 2
+    assert len(summary['pairs']) == 3
+    assert set(summary['training']) == {'C-A'}
+    with pytest.raises(ValueError, match='incomplete'):
+        inv.summarize(rows[:-1], conditions=('A', 'C'))
+
+
+def test_training_checkpoint_selects_default_and_checks_update(tmp_path):
+    import numpy as np
+
+    path = tmp_path / 'training.pt'
+    torch.save({'policy_default': {'weight': torch.tensor([4.])},
+                'policy_old': {'weight': torch.tensor([2.])}, 'next_update': 4,
+                'rng': np.random.get_state()}, path)
+    state, metadata = inv.load_adapter_checkpoint(path, 'training', expected_update=4)
+    assert state['weight'].item() == 4
+    assert metadata == {'format': 'training', 'adapter_key': 'policy_default', 'next_update': 4}
+    with pytest.raises(ValueError, match='update'):
+        inv.load_adapter_checkpoint(path, 'training', expected_update=2)
+    torch.save({'next_update': 4, 'policy_old': {}}, path)
+    with pytest.raises(ValueError, match='policy_default'):
+        inv.load_adapter_checkpoint(path, 'training', expected_update=4)
+
+
+def test_flat_checkpoint_remains_supported(tmp_path):
+    path = tmp_path / 'adapter.pt'
+    torch.save({'weight': torch.ones(2)}, path)
+    state, metadata = inv.load_adapter_checkpoint(path)
+    assert torch.equal(state['weight'], torch.ones(2))
+    assert metadata['format'] == 'adapter'
+    with pytest.raises(ValueError, match='training'):
+        inv.load_adapter_checkpoint(path, expected_update=4)
+
+
+def test_euler_64_video_run_logs_32_pairs(tmp_path, monkeypatch):
+    import csv
+    import wandb
+
+    pipe, cfg, out = setup(tmp_path, monkeypatch)
+    cfg.sampler = 'euler'
+    run = wandb.init(project='diffusionopsd-test', mode='offline', dir=str(out))
+    try:
+        summary = inv.run_investigation(pipe, Reward(), Judge(), cfg,
+                                        [f'prompt {i}' for i in range(16)], out, Scheduler, run)
+    finally:
+        run.finish()
+    assert summary['num_videos'] == 64
+    assert len(summary['pairs']) == 32
+    for start in range(0, 64, 2):
+        base, tuned = pipe.calls[start:start+2]
+        assert (base[3:], tuned[3:]) == ((True, False), (False, False))
+        assert all(torch.equal(base[j], tuned[j]) for j in range(3))
+    assert len(list(out.glob('*.mp4'))) == 64
+    with (out / 'review/preferences.csv').open() as stream:
+        assert len(list(csv.DictReader(stream))) == 32
+    table_paths = list((out / 'wandb').glob('offline-run-*/files/media/table/**/*.table.json'))
+    assert len(table_paths) == 1
+    table = json.loads(table_paths[0].read_text())
+    assert len(table['data']) == 32
+    assert 'base_video' in table['columns'] and 'trained_video' in table['columns']
+    assert pipe.transformer.active_adapters == ['old'] and pipe.transformer.weight.grad is None
+
+
 def test_inputs_and_adapter_checkpoint_rejected(tmp_path):
     inv.prepare_output(tmp_path)
     (tmp_path / 'existing').write_text('keep')

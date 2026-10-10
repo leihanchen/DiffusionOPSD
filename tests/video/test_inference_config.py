@@ -47,6 +47,18 @@ def test_legacy_defaults(arguments):
     assert (cfg.height, cfg.width, cfg.num_frames, cfg.num_steps, cfg.guidance_scale) == (480, 832, 17, 30, 5.)
     assert cfg.config is None and cfg.config_sha256 is None
     assert cfg.num_prompts == 2 and cfg.seed_offsets == [0, 1000]
+    assert cfg.sampler == 'both' and cfg.checkpoint_format == 'adapter'
+
+
+def test_step4_euler_cli(arguments):
+    cfg = cli.parse_args(arguments + ['--sampler', 'euler', '--checkpoint-format', 'training',
+                                     '--expected-update', '4', '--num-prompts', '16'])
+    assert cfg.sampler == 'euler' and cfg.expected_update == 4
+    assert cfg.num_prompts * len(cfg.seed_offsets) * 2 == 64
+    for extra in (['--expected-update', '4'], ['--sampler', 'unknown'],
+                  ['--checkpoint-format', 'training', '--expected-update', '-1']):
+        with pytest.raises(SystemExit):
+            cli.parse_args(arguments + extra)
 
 
 def test_repository_preset_four_video_setup(arguments):

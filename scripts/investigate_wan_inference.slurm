@@ -24,6 +24,15 @@ cd "${SLURM_SUBMIT_DIR:?Submit from the repository root}"
 REPO="$PWD"
 SIF="${REPO}/containers/diffusionopsd.sif"
 POLICY_PATH="${POLICY_PATH:-${REPO}/logs/wan22-debug-4175442/policy_4.pt}"
+CONFIG_PATH="${CONFIG_PATH:-config/wan22_inference_debug.json}"
+CHECKPOINT_FORMAT="${CHECKPOINT_FORMAT:-adapter}"
+SAMPLER="${SAMPLER:-both}"
+NUM_PROMPTS="${NUM_PROMPTS:-1}"
+read -r -a SEED_OFFSET_ARGS <<< "${SEED_OFFSETS:-0}"
+CHECKPOINT_ARGS=(--checkpoint-format "$CHECKPOINT_FORMAT")
+if [[ -n "${EXPECTED_UPDATE:-}" ]]; then
+  CHECKPOINT_ARGS+=(--expected-update "$EXPECTED_UPDATE")
+fi
 OUTPUT="${REPO}/logs/wan22-inference-${SLURM_JOB_ID}"
 export HF_HOME="${REPO}/hf"
 export TORCH_HOME="${REPO}/video_reward_ckpts"
@@ -37,7 +46,7 @@ export APPTAINER_CACHEDIR="${SCRATCH}/apptainer/cache"
 export APPTAINER_TMPDIR="${SCRATCH}/apptainer/tmp"
 export TMPDIR="${SLURM_TMPDIR:-${SCRATCH}/tmp}"
 [[ -f "$SIF" && ! -L "$SIF" ]] || { echo "Missing regular container: $SIF" >&2; exit 1; }
-for input in "$POLICY_PATH" "data/video_motion/test.txt" \
+for input in "$POLICY_PATH" "$CONFIG_PATH" "data/video_motion/test.txt" \
   "${VIDEO_REWARD_CKPT_PATH}/Wan2.2-TI2V-5B-Diffusers/model_index.json" \
   "${VIDEO_REWARD_CKPT_PATH}/VideoReward/model_config.json" \
   "${VIDEO_REWARD_CKPT_PATH}/waft_tar_c_t.pth"; do
@@ -56,6 +65,7 @@ apptainer exec --nv --bind "$REPO" --bind "$SCRATCH" \
   --env PYTHONNOUSERSITE=1 --env WANDB_MODE=offline \
   --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 --env HF_DATASETS_OFFLINE=1 \
   "$SIF" python scripts/investigate_wan_inference.py \
-    --config config/wan22_inference_debug.json \
-    --policy "$POLICY_PATH" --output-dir "$OUTPUT" --num-prompts 1 --seed-offsets 0 \
+    --config "$CONFIG_PATH" --sampler "$SAMPLER" "${CHECKPOINT_ARGS[@]}" \
+    --policy "$POLICY_PATH" --output-dir "$OUTPUT" --num-prompts "$NUM_PROMPTS" \
+    --seed-offsets "${SEED_OFFSET_ARGS[@]}" \
     --policy-device cuda:0 --reward-device cuda:1 --vae-device cuda:0
