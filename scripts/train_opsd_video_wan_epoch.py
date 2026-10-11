@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ruff: noqa: E402
-"""Four-worker, one-pass Wan2.2 OPSD trainer with configured model placement."""
+"""Fixed-global-batch Wan2.2 OPSD trainer with scalable worker placement."""
 
 from __future__ import annotations
 
@@ -35,12 +35,18 @@ from diffusionopsd.stat_tracking import PerPromptStatTracker
 from diffusionopsd.video.branch_loss import branch_loss
 from diffusionopsd.video.distributed_epoch import (
     active_cuda_devices,
+    adapter_fingerprint,
+    assign_rollouts,
+    canonical_samples,
+    prepare_resume,
+    route_sample_weights,
+    topology_rng_seed,
+    training_config_hash,
+    validate_worker_devices,
     atomic_checkpoint,
     deterministic_seed,
-    load_checkpoint,
     prompt_schedule,
     should_start_update,
-    split_update,
     synchronize_gradients,
 )
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
@@ -61,6 +67,9 @@ flags.DEFINE_integer("max_updates_this_job", 0, "Stop after this many new update
 flags.DEFINE_integer("monitor_eval_freq", 0, "Evaluation interval override; zero retains the checkpoint config")
 flags.DEFINE_bool("evaluate_on_resume", False, "Evaluate the loaded policy before further training")
 flags.DEFINE_integer("expected_resume_update", -1, "Require this checkpoint update; -1 permits any start")
+flags.DEFINE_string("resume_from", "", "Explicit trusted local training checkpoint; write to a new run directory")
+flags.DEFINE_bool("allow_topology_change", False, "Permit validated resume with deterministic worker RNG reseeding")
+flags.DEFINE_bool("scalable_two_gpu", False, "Require isolated two-GPU workers with 4/8/16 processes")
 
 
 def _trace(stage, **details):
@@ -174,7 +183,7 @@ def _calibrate(pipe, roll, reward, cfg, prompts, run_dir):
     return refs, float(tau_id), float(tau_motion)
 
 
-def _sample_local(pipe, roll, reward, judge, cfg, prompt, prompt_index, nonce, reference_files):
+def _sample_local(pipe, roll, reward, judge, cfg, prompt, prompt_index, nonce, reference_files, rollout_indices):
     pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device="cuda:0")[:2]
     if prompt_index in reference_files:
         reference = torch.load(reference_files[prompt_index], map_location="cpu", weights_only=True)
@@ -191,7 +200,7 @@ def _sample_local(pipe, roll, reward, judge, cfg, prompt, prompt_index, nonce, r
             reference = roll.decode01(rec_ref.x0)[0].cpu()
         del noise, rec_ref
     tuples = []
-    for repetition in range(cfg.sample.num_image_per_prompt):
+    for repetition in rollout_indices:
         generator = torch.Generator("cuda:0").manual_seed(deterministic_seed(nonce, prompt_index, repetition))
         latents = torch.randn(
             latent_shape_from_pipe(pipe, cfg.video.num_frames, cfg.video.height, cfg.video.width),
@@ -207,6 +216,8 @@ def _sample_local(pipe, roll, reward, judge, cfg, prompt, prompt_index, nonce, r
         tuples.append(
             {
                 "prompt": prompt,
+                "prompt_index": prompt_index,
+                "rollout_index": repetition,
                 "pe": pe,
                 "ne": ne,
                 "rec": rec,
@@ -284,19 +295,22 @@ def main(_):
     if FLAGS.monitor_eval_freq < 0 or FLAGS.expected_resume_update < -1:
         raise ValueError("Monitoring frequency must be nonnegative; expected resume update must be >= -1")
     rank, world = int(os.environ["SLURM_PROCID"]), int(os.environ["SLURM_NTASKS"])
-    if world != 4 or cfg.sample.num_batches_per_epoch != world or cfg.sample.num_image_per_prompt != 4:
-        raise ValueError("This preset requires four workers, one prompt and four rollouts per worker")
+    if world not in (4, 8, 16) or cfg.sample.num_batches_per_epoch != 4 or cfg.sample.num_image_per_prompt != 4:
+        raise ValueError("Require 4/8/16 workers and a fixed four-prompt, four-rollout-per-prompt batch")
+    if not FLAGS.scalable_two_gpu and world != 4:
+        raise ValueError("Additional workers require the scalable two-GPU launcher")
     if cfg.num_epochs != 50 or cfg.save_freq != 50 or cfg.eval_freq != 25 or not cfg.use_lora:
         raise ValueError("Expected 50-update Wan2.2 LoRA preset with evaluation every 25")
     devices = active_cuda_devices(cfg, torch.cuda.device_count())
+    if FLAGS.scalable_two_gpu and (torch.cuda.device_count() != 2 or devices != (0, 1)):
+        raise ValueError("Scalable workers must see exactly two CUDA devices and use cuda:0/cuda:1")
     torch.cuda.set_device(0)
     faulthandler.enable()
     # CPython's timer dumps thread frames without the GIL and can itself segfault
     # mid-dump (python/cpython#116008). Keep fatal-error handling and stage traces.
     _trace("process_group:enter")
     # Rank 0 performs calibration and video evaluation while peers wait.
-    # Every node runs one worker. Global rank is not its local
-    # communication GPU index, including when resume skips the adapter broadcast.
+    # Slurm isolates each worker's devices; global rank is never a local CUDA index.
     dist.init_process_group(
         "nccl",
         rank=rank,
@@ -305,6 +319,23 @@ def main(_):
         device_id=torch.device("cuda:0"),
     )
     _trace("process_group:exit")
+    placement = {
+        "rank": rank,
+        "local_rank": int(os.environ.get("SLURM_LOCALID", "0")),
+        "host": socket.gethostname(),
+        "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "gpu_uuids": [str(getattr(torch.cuda.get_device_properties(d), "uuid", "")) for d in devices],
+    }
+    placements = [None] * world
+    dist.all_gather_object(placements, placement)
+    if FLAGS.scalable_two_gpu:
+        validate_worker_devices(placements, world)
+    hosts = {entry["host"] for entry in placements}
+    per_host = {host: sum(entry["host"] == host for entry in placements) for host in hosts}
+    if len(set(per_host.values())) != 1:
+        raise ValueError("Require equal numbers of workers on each node")
+    topology = {"world_size": world, "workers_per_node": next(iter(per_host.values())), "nodes": len(hosts)}
+    _trace("worker_placement", **placement, topology=topology)
     _trace(
         "model_placement",
         policy_device="cuda:0",
@@ -325,7 +356,27 @@ def main(_):
     evaluator = EvaluationMonitor(cfg) if rank == 0 else None
     state_path = run_dir / "training_state.pt"
     _trace("resume_checkpoint:enter")
-    state = load_checkpoint(state_path, prompt_hash, config_hash) if state_path.exists() else None
+    source_path = Path(FLAGS.resume_from).expanduser().resolve() if FLAGS.resume_from else state_path
+    if FLAGS.resume_from:
+        if not source_path.is_file():
+            raise ValueError(f"Missing trusted resume checkpoint: {source_path}")
+        if source_path.parent.resolve() == run_dir.resolve() or state_path.exists():
+            raise ValueError("Explicit checkpoint migration requires a new destination run directory")
+    state = torch.load(source_path, map_location="cpu", weights_only=False) if source_path.exists() else None
+    topology_changed = False
+    if state is not None:
+        state, topology_changed = prepare_resume(
+            state,
+            cfg.to_dict(),
+            prompt_hash,
+            topology,
+            FLAGS.allow_topology_change,
+            str(source_path.parent) if FLAGS.resume_from else None,
+        )
+    migrations = state.get("topology_migrations", []) if state else []
+    if topology_changed:
+        migrations[-1]["source_checkpoint"] = str(source_path)
+    _trace("checkpoint_topology", changed=topology_changed, migrations=migrations)
     if FLAGS.expected_resume_update >= 0 and (state is None or state["next_update"] != FLAGS.expected_resume_update):
         raise ValueError(
             f"Expected checkpoint at update {FLAGS.expected_resume_update}, "
@@ -341,6 +392,12 @@ def main(_):
             mode="offline",
             config={
                 **cfg.to_dict(),
+                "execution": {
+                    **topology,
+                    "placements": placements,
+                    "topology_migrations": migrations,
+                    "resume_checkpoint": str(source_path) if state is not None else None,
+                },
                 "monitoring": {
                     "eval_freq": FLAGS.monitor_eval_freq or cfg.eval_freq,
                     "evaluate_on_resume": FLAGS.evaluate_on_resume,
@@ -386,7 +443,7 @@ def main(_):
     if state is None:
         if rank == 0:
             nonce = int.from_bytes(os.urandom(8), "big")
-            order = prompt_schedule(prompts, nonce, world)
+            order = prompt_schedule(prompts, nonce, 4)
             policy.set_adapter("old")
             refs, tau_id, tau_motion = _calibrate(pipe, roll, reward, cfg, prompts, run_dir)
             policy.set_adapter("default")
@@ -410,7 +467,15 @@ def main(_):
             tracker.history_prompts = {hash(prompt) for prompt in tracker.stats}
             evaluator.baseline = state["eval_baseline"]
         _trace("rng_restore:enter")
-        _restore_rng(state["rng_states"][rank])
+        if topology_changed:
+            seed = topology_rng_seed(nonce, completed, rank)
+            random.seed(seed)
+            np.random.seed(seed % (2**32))
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            _trace("rng_reseed", seed=seed)
+        else:
+            _restore_rng(state["rng_states"][rank])
         _trace("rng_restore:exit")
         if rank == 0 and FLAGS.evaluate_on_resume:
             _trace("resume_evaluation:enter", optimizer_updates=completed)
@@ -437,6 +502,9 @@ def main(_):
             completed,
             max_update_seconds,
             rng_states,
+            cfg.to_dict(),
+            topology,
+            migrations,
         )
     _barrier("startup_barrier")
     del state
@@ -459,11 +527,11 @@ def main(_):
         update_start = time.monotonic()
         for device in devices:
             torch.cuda.reset_peak_memory_stats(device)
-        index = split_update(order, completed, rank, world)[0]
+        index, rollout_indices = assign_rollouts(order, completed, rank, world)
         prompt = prompts[index]
         policy.set_adapter("old")
         _trace(f"update_{completed + 1}:sampling:enter")
-        tuples = _sample_local(pipe, roll, reward, judge, cfg, prompt, index, nonce, refs)
+        tuples = _sample_local(pipe, roll, reward, judge, cfg, prompt, index, nonce, refs, rollout_indices)
         _trace(f"update_{completed + 1}:sampling:exit")
         # VideoReward is not used by the differentiable geometry target. Move its
         # frozen weights off the scorer GPU before WAFT recomputes in backward.
@@ -471,25 +539,29 @@ def main(_):
         with torch.cuda.device(cfg.judge.device):
             torch.cuda.empty_cache()
         gathered = [None] * world
-        dist.all_gather_object(gathered, [(t["prompt"], t["r"], t["m"], t["p_q"]) for t in tuples])
+        dist.all_gather_object(
+            gathered,
+            [{key: t[key] for key in ("prompt", "prompt_index", "rollout_index", "r", "m", "p_q")} for t in tuples],
+        )
+        flat = canonical_samples(gathered, order, completed, world)
+        global_rollouts = len(flat)
         sample_seconds = time.monotonic() - update_start
         if rank == 0:
-            flat = [entry for group in gathered for entry in group]
-            advantages = tracker.update([entry[0] for entry in flat], np.array([entry[1] for entry in flat]))
+            advantages = tracker.update([entry["prompt"] for entry in flat], np.array([entry["r"] for entry in flat]))
             weights = [
                 float(
                     effective_weight(
                         torch.tensor([float(a)]),
                         cfg.train.adv_clip_max,
-                        torch.tensor([entry[2]]),
+                        torch.tensor([entry["m"]]),
                         tau_motion,
-                        torch.tensor([entry[3]]),
+                        torch.tensor([entry["p_q"]]),
                         cfg.gates.tau_q,
                     )
                 )
                 for entry, a in zip(flat, advantages)
             ]
-            weight_groups = [weights[i * 4 : (i + 1) * 4] for i in range(world)]
+            weight_groups = route_sample_weights(flat, weights, gathered)
         else:
             weight_groups = None
         weight_box = [weight_groups]
@@ -529,6 +601,16 @@ def main(_):
         ema_adapter_(policy, src="default", dst="old", decay=0.99)
         opt.zero_grad(set_to_none=True)
         tuples.clear()
+        _trace("adapter_consistency:enter")
+        adapter_hashes = {
+            name: adapter_fingerprint(get_peft_model_state_dict(policy, adapter_name=name))
+            for name in ("default", "old")
+        }
+        worker_hashes = [None] * world
+        dist.all_gather_object(worker_hashes, adapter_hashes)
+        if any(hashes != adapter_hashes for hashes in worker_hashes):
+            raise RuntimeError("Worker adapter states differ after the global optimizer update")
+        _trace("adapter_consistency:exit", adapter_hashes=adapter_hashes)
         for device in devices:
             torch.cuda.synchronize(device)
         optimizer_seconds = time.monotonic() - optimizer_start
@@ -556,12 +638,19 @@ def main(_):
                 "train/rl_distillation_loss": counts[1].item() / total_kept,
                 "train/optimization_loss": counts[1].item() * cfg.train.adv_clip_max / total_kept,
                 "grad_norm": float(grad_norm),
-                "n_rollouts": world * cfg.sample.num_image_per_prompt,
+                "n_rollouts": global_rollouts,
+                "execution/world_size": world,
+                "execution/adapters_consistent": True,
+                "execution/default_adapter_sha256": adapter_hashes["default"],
+                "execution/old_adapter_sha256": adapter_hashes["old"],
+                "execution/workers_per_node": topology["workers_per_node"],
+                "execution/prompts_per_update": 4,
+                "execution/rollouts_per_worker": len(rollout_indices),
                 "n_kept": total_kept,
-                "mean_r": counts[2].item() / 16,
-                "mean_w": counts[3].item() / 16,
-                "frac_motion_masked": counts[4].item() / 16,
-                "frac_quality_masked": counts[5].item() / 16,
+                "mean_r": counts[2].item() / global_rollouts,
+                "mean_w": counts[3].item() / global_rollouts,
+                "frac_motion_masked": counts[4].item() / global_rollouts,
+                "frac_quality_masked": counts[5].item() / global_rollouts,
                 "tau_id": tau_id,
                 "tau_motion": tau_motion,
                 "train/update_seconds": float(timings.item()),
@@ -598,6 +687,9 @@ def main(_):
                 completed,
                 max_update_seconds,
                 rng_states,
+                cfg.to_dict(),
+                topology,
+                migrations,
             )
         _barrier(f"update_{completed}:checkpoint_barrier")
     if rank == 0:
@@ -631,9 +723,16 @@ def _save_state(
     completed,
     max_update_seconds,
     rng_states,
+    training_config,
+    topology,
+    migrations,
 ):
     state = {
-        "version": 1,
+        "version": 2,
+        "training_config": training_config,
+        "training_config_hash": training_config_hash(training_config),
+        "topology": topology,
+        "topology_migrations": migrations,
         "next_update": completed,
         "prompt_hash": prompt_hash,
         "config_hash": config_hash,
@@ -649,6 +748,10 @@ def _save_state(
         "eval_baseline": evaluator.baseline,
         "max_update_seconds": max_update_seconds,
         "rng_states": rng_states,
+    }
+    state["adapter_fingerprints"] = {
+        "default": adapter_fingerprint(state["policy_default"]),
+        "old": adapter_fingerprint(state["policy_old"]),
     }
     atomic_checkpoint(path, state)
 
