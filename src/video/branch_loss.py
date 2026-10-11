@@ -1,4 +1,5 @@
 """Paper Eq. 11-13 with the masked endpoint weight from gates.effective_weight."""
+
 from __future__ import annotations
 
 import torch

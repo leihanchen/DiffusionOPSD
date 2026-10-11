@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # ruff: noqa: E402
 """Four-worker, one-pass Wan2.2 OPSD trainer with configured model placement."""
+
 from __future__ import annotations
 
 import hashlib
@@ -33,8 +34,14 @@ from diffusionopsd.metrics import install_wandb_jsonl_tee
 from diffusionopsd.stat_tracking import PerPromptStatTracker
 from diffusionopsd.video.branch_loss import branch_loss
 from diffusionopsd.video.distributed_epoch import (
-    active_cuda_devices, atomic_checkpoint, deterministic_seed, load_checkpoint, prompt_schedule,
-    should_start_update, split_update, synchronize_gradients,
+    active_cuda_devices,
+    atomic_checkpoint,
+    deterministic_seed,
+    load_checkpoint,
+    prompt_schedule,
+    should_start_update,
+    split_update,
+    synchronize_gradients,
 )
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
 from diffusionopsd.video.gates import effective_weight, identity_keep, percentile_threshold
@@ -57,10 +64,20 @@ flags.DEFINE_integer("expected_resume_update", -1, "Require this checkpoint upda
 
 
 def _trace(stage, **details):
-    print(json.dumps({"event": "progress", "stage": stage, "rank": os.environ.get("SLURM_PROCID"),
-                      "host": socket.gethostname(), "time": time.time(),
-                      "cuda_device": torch.cuda.current_device() if torch.cuda.is_initialized() else None, **details}),
-          flush=True)
+    print(
+        json.dumps(
+            {
+                "event": "progress",
+                "stage": stage,
+                "rank": os.environ.get("SLURM_PROCID"),
+                "host": socket.gethostname(),
+                "time": time.time(),
+                "cuda_device": torch.cuda.current_device() if torch.cuda.is_initialized() else None,
+                **details,
+            }
+        ),
+        flush=True,
+    )
 
 
 def _barrier(stage):
@@ -87,8 +104,9 @@ def _broadcast_adapter(policy):
 def _log(record, videos=()):
     payload = dict(record)
     if videos:
-        payload["eval/videos"] = [wandb.Video(v["path"], format="mp4",
-                                        caption=f"{v['prompt']} | seed={v['seed']}") for v in videos]
+        payload["eval/videos"] = [
+            wandb.Video(v["path"], format="mp4", caption=f"{v['prompt']} | seed={v['seed']}") for v in videos
+        ]
     wandb.log(payload, step=record["optimizer_updates"])
     print(json.dumps(record, allow_nan=False), flush=True)
 
@@ -112,8 +130,12 @@ def _cpu_state(value):
 
 
 def _rng_state():
-    return {"python": random.getstate(), "numpy": np.random.get_state(),
-            "torch": torch.get_rng_state(), "cuda": torch.cuda.get_rng_state_all()}
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all(),
+    }
 
 
 def _restore_rng(state):
@@ -128,11 +150,14 @@ def _calibrate(pipe, roll, reward, cfg, prompts, run_dir):
     s_ids, motions = [], []
     for index in random.Random(0).sample(range(len(prompts)), cfg.gates.calib_prompts):
         prompt = prompts[index]
-        pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True,
-                                    device="cuda:0")[:2]
+        pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device="cuda:0")[:2]
         generator = torch.Generator("cuda:0").manual_seed(_prompt_seed(prompt))
-        noise = torch.randn(latent_shape_from_pipe(pipe, cfg.video.num_frames, cfg.video.height, cfg.video.width),
-                            device="cuda:0", dtype=torch.float32, generator=generator)
+        noise = torch.randn(
+            latent_shape_from_pipe(pipe, cfg.video.num_frames, cfg.video.height, cfg.video.width),
+            device="cuda:0",
+            dtype=torch.float32,
+            generator=generator,
+        )
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
             rec = roll.rollout(pe, ne, noise, cfg.opa.query_sigma)
             clip = roll.decode01(rec.x0)
@@ -150,14 +175,17 @@ def _calibrate(pipe, roll, reward, cfg, prompts, run_dir):
 
 
 def _sample_local(pipe, roll, reward, judge, cfg, prompt, prompt_index, nonce, reference_files):
-    pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True,
-                                device="cuda:0")[:2]
+    pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device="cuda:0")[:2]
     if prompt_index in reference_files:
         reference = torch.load(reference_files[prompt_index], map_location="cpu", weights_only=True)
     else:
         generator = torch.Generator("cuda:0").manual_seed(_prompt_seed(prompt))
-        noise = torch.randn(latent_shape_from_pipe(pipe, cfg.video.num_frames, cfg.video.height, cfg.video.width),
-                            device="cuda:0", dtype=torch.float32, generator=generator)
+        noise = torch.randn(
+            latent_shape_from_pipe(pipe, cfg.video.num_frames, cfg.video.height, cfg.video.width),
+            device="cuda:0",
+            dtype=torch.float32,
+            generator=generator,
+        )
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
             rec_ref = roll.rollout(pe, ne, noise, cfg.opa.query_sigma)
             reference = roll.decode01(rec_ref.x0)[0].cpu()
@@ -165,15 +193,28 @@ def _sample_local(pipe, roll, reward, judge, cfg, prompt, prompt_index, nonce, r
     tuples = []
     for repetition in range(cfg.sample.num_image_per_prompt):
         generator = torch.Generator("cuda:0").manual_seed(deterministic_seed(nonce, prompt_index, repetition))
-        latents = torch.randn(latent_shape_from_pipe(pipe, cfg.video.num_frames, cfg.video.height, cfg.video.width),
-                              device="cuda:0", dtype=torch.float32, generator=generator)
+        latents = torch.randn(
+            latent_shape_from_pipe(pipe, cfg.video.num_frames, cfg.video.height, cfg.video.width),
+            device="cuda:0",
+            dtype=torch.float32,
+            generator=generator,
+        )
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
             rec = roll.rollout(pe, ne, latents, cfg.opa.query_sigma)
             clip = roll.decode01(rec.x0)
             scored = reward(clip.to(cfg.reward_device))
             p_q = judge.p_win(clip[0].to(cfg.judge.device), reference.to(cfg.judge.device), prompt)
-        tuples.append({"prompt": prompt, "pe": pe, "ne": ne, "rec": rec,
-                       "r": float(scored.geo), "m": float(scored.motion), "p_q": float(p_q)})
+        tuples.append(
+            {
+                "prompt": prompt,
+                "pe": pe,
+                "ne": ne,
+                "rec": rec,
+                "r": float(scored.geo),
+                "m": float(scored.motion),
+                "p_q": float(p_q),
+            }
+        )
         del latents, clip, scored
     return tuples
 
@@ -201,12 +242,10 @@ def _targets_and_gradients(tuples, weights, roll, reward, policy, opt, cfg, tau_
         _trace(f"{stage}:first_gradient:exit")
         sample["y0"] = y0
         _trace(f"{stage}:positive_target:enter")
-        sample["y_plus"] = opa_tr_step_nd(y0, r_geo, cfg.opa.rho, cfg.opa.n_ascent,
-                                           cfg.opa.eta, +1.0, first_grad=g0)
+        sample["y_plus"] = opa_tr_step_nd(y0, r_geo, cfg.opa.rho, cfg.opa.n_ascent, cfg.opa.eta, +1.0, first_grad=g0)
         _trace(f"{stage}:positive_target:exit")
         _trace(f"{stage}:negative_target:enter")
-        sample["y_minus"] = opa_tr_step_nd(y0, r_geo, cfg.opa.rho, cfg.opa.n_ascent,
-                                            cfg.opa.eta, -1.0, first_grad=g0)
+        sample["y_minus"] = opa_tr_step_nd(y0, r_geo, cfg.opa.rho, cfg.opa.n_ascent, cfg.opa.eta, -1.0, first_grad=g0)
         _trace(f"{stage}:negative_target:exit")
         sample["weight"] = weight
         kept.append(sample)
@@ -219,11 +258,18 @@ def _targets_and_gradients(tuples, weights, roll, reward, policy, opt, cfg, tau_
         _trace(f"policy_sample_{sample_index}:enter")
         rec = sample["rec"]
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            velocity = roll.velocity(rec.z_q, torch.tensor(rec.sigma_q, device="cuda:0"),
-                                     sample["pe"], sample["ne"], transformer=policy)
+            velocity = roll.velocity(
+                rec.z_q, torch.tensor(rec.sigma_q, device="cuda:0"), sample["pe"], sample["ne"], transformer=policy
+            )
         y_theta = clean_output(rec.z_q, velocity, torch.tensor([rec.sigma_q], device="cuda:0")).float()
-        loss = branch_loss(y_theta, sample["y0"], sample["y_plus"], sample["y_minus"],
-                           torch.tensor([sample["weight"]], device="cuda:0"), cfg.beta).mean()
+        loss = branch_loss(
+            y_theta,
+            sample["y0"],
+            sample["y_plus"],
+            sample["y_minus"],
+            torch.tensor([sample["weight"]], device="cuda:0"),
+            cfg.beta,
+        ).mean()
         local_loss += float(loss.detach())
         (loss * cfg.train.adv_clip_max).backward()
         _trace(f"policy_sample_{sample_index}:exit", loss=float(loss.detach()))
@@ -251,12 +297,22 @@ def main(_):
     # Rank 0 performs calibration and video evaluation while peers wait.
     # Every node runs one worker. Global rank is not its local
     # communication GPU index, including when resume skips the adapter broadcast.
-    dist.init_process_group("nccl", rank=rank, world_size=world,
-                            timeout=timedelta(minutes=FLAGS.distributed_timeout_minutes),
-                            device_id=torch.device("cuda:0"))
+    dist.init_process_group(
+        "nccl",
+        rank=rank,
+        world_size=world,
+        timeout=timedelta(minutes=FLAGS.distributed_timeout_minutes),
+        device_id=torch.device("cuda:0"),
+    )
     _trace("process_group:exit")
-    _trace("model_placement", policy_device="cuda:0", vae_device=cfg.vae_device,
-           reward_device=cfg.reward_device, judge_device=cfg.judge.device, active_devices=devices)
+    _trace(
+        "model_placement",
+        policy_device="cuda:0",
+        vae_device=cfg.vae_device,
+        reward_device=cfg.reward_device,
+        judge_device=cfg.judge.device,
+        active_devices=devices,
+    )
     started = time.monotonic()
     run_dir = Path(cfg.logdir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -270,20 +326,29 @@ def main(_):
     state_path = run_dir / "training_state.pt"
     _trace("resume_checkpoint:enter")
     state = load_checkpoint(state_path, prompt_hash, config_hash) if state_path.exists() else None
-    if FLAGS.expected_resume_update >= 0 and (
-        state is None or state["next_update"] != FLAGS.expected_resume_update
-    ):
-        raise ValueError(f"Expected checkpoint at update {FLAGS.expected_resume_update}, "
-                         f"got {state['next_update'] if state else 'no checkpoint'}")
+    if FLAGS.expected_resume_update >= 0 and (state is None or state["next_update"] != FLAGS.expected_resume_update):
+        raise ValueError(
+            f"Expected checkpoint at update {FLAGS.expected_resume_update}, "
+            f"got {state['next_update'] if state else 'no checkpoint'}"
+        )
     _trace("resume_checkpoint:exit")
     if rank == 0:
-        wandb.init(project="diffusionopsd", group=run_dir.name,
-                   name=f"{run_dir.name}-job-{os.environ['SLURM_JOB_ID']}", dir=str(run_dir),
-                   mode="offline", config={**cfg.to_dict(), "monitoring": {
-                       "eval_freq": FLAGS.monitor_eval_freq or cfg.eval_freq,
-                       "evaluate_on_resume": FLAGS.evaluate_on_resume,
-                       "expected_resume_update": FLAGS.expected_resume_update,
-                       "max_updates_this_job": FLAGS.max_updates_this_job}})
+        wandb.init(
+            project="diffusionopsd",
+            group=run_dir.name,
+            name=f"{run_dir.name}-job-{os.environ['SLURM_JOB_ID']}",
+            dir=str(run_dir),
+            mode="offline",
+            config={
+                **cfg.to_dict(),
+                "monitoring": {
+                    "eval_freq": FLAGS.monitor_eval_freq or cfg.eval_freq,
+                    "evaluate_on_resume": FLAGS.evaluate_on_resume,
+                    "expected_resume_update": FLAGS.expected_resume_update,
+                    "max_updates_this_job": FLAGS.max_updates_this_job,
+                },
+            },
+        )
         install_wandb_jsonl_tee(wandb, run_dir / "metrics.jsonl", durable=True, strict=True)
     model_path = os.path.expandvars(cfg.pretrained.model)
     _trace("wan_model:enter")
@@ -306,11 +371,13 @@ def main(_):
     opt = torch.optim.AdamW(trainable, lr=cfg.train.learning_rate, weight_decay=cfg.train.adam_weight_decay)
     if state is not None:
         opt.load_state_dict(state["optimizer"])
-    roll = WanRollout(pipe, cfg.sample.num_steps, cfg.sample.guidance_scale,
-                      offload_vae_activations=cfg.offload_vae_activations)
+    roll = WanRollout(
+        pipe, cfg.sample.num_steps, cfg.sample.guidance_scale, offload_vae_activations=cfg.offload_vae_activations
+    )
     _trace("geometry_models:enter")
-    reward = GeoReward(load_depth_anything3(cfg.reward_device), load_waft(cfg.reward_device),
-                       load_dinov2(cfg.reward_device)).requires_grad_(False)
+    reward = GeoReward(
+        load_depth_anything3(cfg.reward_device), load_waft(cfg.reward_device), load_dinov2(cfg.reward_device)
+    ).requires_grad_(False)
     _trace("geometry_models:exit")
     _trace("quality_model:enter")
     judge = load_video_reward(cfg.judge.device, num_frames=cfg.judge.num_frames)
@@ -354,15 +421,31 @@ def main(_):
         rng_states = [None] * world
         dist.all_gather_object(rng_states, _rng_state())
     if rank == 0 and state is None:
-        _save_state(state_path, policy, opt, tracker, evaluator, prompt_hash, config_hash,
-                    nonce, order, refs, tau_id, tau_motion, completed, max_update_seconds, rng_states)
+        _save_state(
+            state_path,
+            policy,
+            opt,
+            tracker,
+            evaluator,
+            prompt_hash,
+            config_hash,
+            nonce,
+            order,
+            refs,
+            tau_id,
+            tau_motion,
+            completed,
+            max_update_seconds,
+            rng_states,
+        )
     _barrier("startup_barrier")
     del state
     initial_completed = completed
     while completed < cfg.num_epochs:
         if rank == 0:
-            can_start = should_start_update(completed, cfg.num_epochs, time.monotonic() - started,
-                                            max_update_seconds, FLAGS.job_budget_hours * 3600)
+            can_start = should_start_update(
+                completed, cfg.num_epochs, time.monotonic() - started, max_update_seconds, FLAGS.job_budget_hours * 3600
+            )
             if FLAGS.max_updates_this_job and completed - initial_completed >= FLAGS.max_updates_this_job:
                 can_start = False
         else:
@@ -393,27 +476,45 @@ def main(_):
         if rank == 0:
             flat = [entry for group in gathered for entry in group]
             advantages = tracker.update([entry[0] for entry in flat], np.array([entry[1] for entry in flat]))
-            weights = [float(effective_weight(torch.tensor([float(a)]), cfg.train.adv_clip_max,
-                                              torch.tensor([entry[2]]), tau_motion,
-                                              torch.tensor([entry[3]]), cfg.gates.tau_q))
-                       for entry, a in zip(flat, advantages)]
-            weight_groups = [weights[i * 4:(i + 1) * 4] for i in range(world)]
+            weights = [
+                float(
+                    effective_weight(
+                        torch.tensor([float(a)]),
+                        cfg.train.adv_clip_max,
+                        torch.tensor([entry[2]]),
+                        tau_motion,
+                        torch.tensor([entry[3]]),
+                        cfg.gates.tau_q,
+                    )
+                )
+                for entry, a in zip(flat, advantages)
+            ]
+            weight_groups = [weights[i * 4 : (i + 1) * 4] for i in range(world)]
         else:
             weight_groups = None
         weight_box = [weight_groups]
         dist.broadcast_object_list(weight_box, src=0)
         target_start = time.monotonic()
         _trace(f"update_{completed + 1}:target_gradients:enter")
-        local_kept, local_loss = _targets_and_gradients(tuples, weight_box[0][rank], roll, reward,
-                                                         policy, opt, cfg, tau_id)
+        local_kept, local_loss = _targets_and_gradients(
+            tuples, weight_box[0][rank], roll, reward, policy, opt, cfg, tau_id
+        )
         _trace(f"update_{completed + 1}:target_gradients:exit")
         judge.to(cfg.judge.device)
         target_seconds = time.monotonic() - target_start
         optimizer_start = time.monotonic()
-        counts = torch.tensor([local_kept, local_loss, sum(t["r"] for t in tuples),
-                               sum(weight_box[0][rank]), sum(t["m"] < tau_motion for t in tuples),
-                               sum(t["p_q"] < cfg.gates.tau_q for t in tuples)],
-                              device="cuda:0", dtype=torch.float64)
+        counts = torch.tensor(
+            [
+                local_kept,
+                local_loss,
+                sum(t["r"] for t in tuples),
+                sum(weight_box[0][rank]),
+                sum(t["m"] < tau_motion for t in tuples),
+                sum(t["p_q"] < cfg.gates.tau_q for t in tuples),
+            ],
+            device="cuda:0",
+            dtype=torch.float64,
+        )
         _trace("update_counts:enter", retained_rollouts=local_kept)
         dist.all_reduce(counts, op=dist.ReduceOp.SUM)
         _trace("update_counts:exit")
@@ -438,45 +539,75 @@ def main(_):
         dist.all_reduce(phase_times, op=dist.ReduceOp.MAX)
         completed += 1
         max_update_seconds = max(max_update_seconds or 0, float(timings.item()))
-        peaks = {f"gpu/{rank}/{device}/peak_{kind}_bytes": measure(device)
-                 for device in devices
-                 for kind, measure in (("allocated", torch.cuda.max_memory_allocated),
-                                       ("reserved", torch.cuda.max_memory_reserved))}
+        peaks = {
+            f"gpu/{rank}/{device}/peak_{kind}_bytes": measure(device)
+            for device in devices
+            for kind, measure in (
+                ("allocated", torch.cuda.max_memory_allocated),
+                ("reserved", torch.cuda.max_memory_reserved),
+            )
+        }
         peaks[f"worker/{rank}/host_peak_rss_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
         peak_list = [None] * world
         dist.all_gather_object(peak_list, peaks)
         if rank == 0:
-            record = {"optimizer_updates": completed, "train/rl_distillation_loss": counts[1].item() / total_kept,
-                      "train/optimization_loss": counts[1].item() * cfg.train.adv_clip_max / total_kept,
-                      "grad_norm": float(grad_norm), "n_rollouts": world * cfg.sample.num_image_per_prompt,
-                      "n_kept": total_kept, "mean_r": counts[2].item() / 16,
-                      "mean_w": counts[3].item() / 16,
-                      "frac_motion_masked": counts[4].item() / 16,
-                      "frac_quality_masked": counts[5].item() / 16,
-                      "tau_id": tau_id, "tau_motion": tau_motion,
-                      "train/update_seconds": float(timings.item()),
-                      "train/sampling_seconds": float(phase_times[0]),
-                      "train/target_seconds": float(phase_times[1]),
-                      "train/optimizer_seconds": float(phase_times[2]),
-                      **{key: value for group in peak_list for key, value in group.items()}}
+            record = {
+                "optimizer_updates": completed,
+                "train/rl_distillation_loss": counts[1].item() / total_kept,
+                "train/optimization_loss": counts[1].item() * cfg.train.adv_clip_max / total_kept,
+                "grad_norm": float(grad_norm),
+                "n_rollouts": world * cfg.sample.num_image_per_prompt,
+                "n_kept": total_kept,
+                "mean_r": counts[2].item() / 16,
+                "mean_w": counts[3].item() / 16,
+                "frac_motion_masked": counts[4].item() / 16,
+                "frac_quality_masked": counts[5].item() / 16,
+                "tau_id": tau_id,
+                "tau_motion": tau_motion,
+                "train/update_seconds": float(timings.item()),
+                "train/sampling_seconds": float(phase_times[0]),
+                "train/target_seconds": float(phase_times[1]),
+                "train/optimizer_seconds": float(phase_times[2]),
+                **{key: value for group in peak_list for key, value in group.items()},
+            }
             videos = []
             if evaluation_due(completed, cfg.num_epochs, cfg.eval_freq, override_freq=FLAGS.monitor_eval_freq):
                 metrics, videos = evaluator.evaluate(pipe, policy, roll, reward, judge, completed)
                 record.update(metrics)
             _log(record, videos)
             if completed % cfg.save_freq == 0:
-                torch.save(get_peft_model_state_dict(policy, adapter_name="default"),
-                           run_dir / f"policy_{completed}.pt")
+                torch.save(
+                    get_peft_model_state_dict(policy, adapter_name="default"), run_dir / f"policy_{completed}.pt"
+                )
         rng_states = [None] * world
         dist.all_gather_object(rng_states, _rng_state())
         if rank == 0:
-            _save_state(state_path, policy, opt, tracker, evaluator, prompt_hash, config_hash,
-                        nonce, order, refs, tau_id, tau_motion, completed, max_update_seconds, rng_states)
+            _save_state(
+                state_path,
+                policy,
+                opt,
+                tracker,
+                evaluator,
+                prompt_hash,
+                config_hash,
+                nonce,
+                order,
+                refs,
+                tau_id,
+                tau_motion,
+                completed,
+                max_update_seconds,
+                rng_states,
+            )
         _barrier(f"update_{completed}:checkpoint_barrier")
     if rank == 0:
-        result = {"status": "complete" if completed == cfg.num_epochs else "continue",
-                  "completed_updates": completed, "total_updates": cfg.num_epochs,
-                  "run_dir": str(run_dir), "job_id": os.environ["SLURM_JOB_ID"]}
+        result = {
+            "status": "complete" if completed == cfg.num_epochs else "continue",
+            "completed_updates": completed,
+            "total_updates": cfg.num_epochs,
+            "run_dir": str(run_dir),
+            "job_id": os.environ["SLURM_JOB_ID"],
+        }
         (run_dir / f"job_{os.environ['SLURM_JOB_ID']}.json").write_text(json.dumps(result, indent=2) + "\n")
         wandb.finish()
         print(json.dumps(result), flush=True)
@@ -484,16 +615,41 @@ def main(_):
     dist.destroy_process_group()
 
 
-def _save_state(path, policy, opt, tracker, evaluator, prompt_hash, config_hash,
-                nonce, order, refs, tau_id, tau_motion, completed, max_update_seconds, rng_states):
-    state = {"version": 1, "next_update": completed, "prompt_hash": prompt_hash,
-             "config_hash": config_hash, "nonce": nonce, "order": order,
-             "reference_files": refs, "tau_id": tau_id, "tau_motion": tau_motion,
-             "policy_default": _cpu_state(get_peft_model_state_dict(policy, adapter_name="default")),
-             "policy_old": _cpu_state(get_peft_model_state_dict(policy, adapter_name="old")),
-             "optimizer": _cpu_state(opt.state_dict()), "tracker_stats": tracker.stats,
-             "eval_baseline": evaluator.baseline, "max_update_seconds": max_update_seconds,
-             "rng_states": rng_states}
+def _save_state(
+    path,
+    policy,
+    opt,
+    tracker,
+    evaluator,
+    prompt_hash,
+    config_hash,
+    nonce,
+    order,
+    refs,
+    tau_id,
+    tau_motion,
+    completed,
+    max_update_seconds,
+    rng_states,
+):
+    state = {
+        "version": 1,
+        "next_update": completed,
+        "prompt_hash": prompt_hash,
+        "config_hash": config_hash,
+        "nonce": nonce,
+        "order": order,
+        "reference_files": refs,
+        "tau_id": tau_id,
+        "tau_motion": tau_motion,
+        "policy_default": _cpu_state(get_peft_model_state_dict(policy, adapter_name="default")),
+        "policy_old": _cpu_state(get_peft_model_state_dict(policy, adapter_name="old")),
+        "optimizer": _cpu_state(opt.state_dict()),
+        "tracker_stats": tracker.stats,
+        "eval_baseline": evaluator.baseline,
+        "max_update_seconds": max_update_seconds,
+        "rng_states": rng_states,
+    }
     atomic_checkpoint(path, state)
 
 

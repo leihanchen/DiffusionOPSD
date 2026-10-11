@@ -30,13 +30,21 @@ def warp_features(feat_next: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
     grid = torch.stack([xs, ys], dim=0).float()[None] + flow_p  # [B,2,h,w] sample positions in next frame
     gx = 2 * grid[:, 0] / max(w - 1, 1) - 1
     gy = 2 * grid[:, 1] / max(h - 1, 1) - 1
-    return F.grid_sample(feat_next, torch.stack([gx, gy], dim=-1), mode="bilinear",
-                         padding_mode="border", align_corners=True)
+    return F.grid_sample(
+        feat_next, torch.stack([gx, gy], dim=-1), mode="bilinear", padding_mode="border", align_corners=True
+    )
 
 
 class GeoReward(torch.nn.Module):
-    def __init__(self, depth: DepthEstimator, flow: FlowEstimator, feats: PatchFeatureExtractor,
-                 w_rigid: float = 0.5, w_dino: float = 0.5, residual_scale: float = 1.0):
+    def __init__(
+        self,
+        depth: DepthEstimator,
+        flow: FlowEstimator,
+        feats: PatchFeatureExtractor,
+        w_rigid: float = 0.5,
+        w_dino: float = 0.5,
+        residual_scale: float = 1.0,
+    ):
         super().__init__()
         self.depth, self.flow, self.feats = depth, flow, feats
         self.w_rigid, self.w_dino, self.residual_scale = w_rigid, w_dino, residual_scale

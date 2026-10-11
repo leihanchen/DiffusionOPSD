@@ -30,9 +30,7 @@ class RolloutRecord:
 
 
 class WanRollout:
-    def __init__(
-        self, pipeline, num_steps: int, guidance_scale: float, offload_vae_activations: bool = False
-    ):
+    def __init__(self, pipeline, num_steps: int, guidance_scale: float, offload_vae_activations: bool = False):
         self.pipe, self.num_steps, self.g = pipeline, num_steps, guidance_scale
         self.offload_vae_activations = offload_vae_activations
 

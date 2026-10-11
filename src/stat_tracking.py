@@ -15,9 +15,7 @@ def calculate_prompt_group_dispersion(group_keys, rewards):
     if values.ndim == 0:
         values = values.reshape(1)
     if values.shape[0] != keys.shape[0]:
-        raise ValueError(
-            f"group/reward length mismatch: {keys.shape[0]} != {values.shape[0]}"
-        )
+        raise ValueError(f"group/reward length mismatch: {keys.shape[0]} != {values.shape[0]}")
     if values.ndim > 1:
         values = values.reshape(values.shape[0], -1)[:, 0]
     if keys.size == 0:

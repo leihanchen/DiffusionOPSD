@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Compare pretrained/trained Wan with custom Euler and native UniPC inference."""
+
 from __future__ import annotations
 
 import argparse
@@ -27,8 +28,12 @@ def parse_args(argv=None):
     selected, _ = config_parser.parse_known_args(argv)
     p = argparse.ArgumentParser(description=__doc__, parents=[config_parser], allow_abbrev=False)
     p.add_argument("--policy", required=True, type=Path)
-    p.add_argument("--checkpoint-format", choices=("adapter", "training"), default="adapter",
-                   help="Use training only for trusted local full checkpoints (pickle)")
+    p.add_argument(
+        "--checkpoint-format",
+        choices=("adapter", "training"),
+        default="adapter",
+        help="Use training only for trusted local full checkpoints (pickle)",
+    )
     p.add_argument("--expected-update", type=int, help="Require this completed update in a training checkpoint")
     p.add_argument("--sampler", choices=("both", "euler", "native"), default="both")
     p.add_argument("--output-dir", required=True, type=Path)
@@ -40,7 +45,7 @@ def parse_args(argv=None):
     p.add_argument("--width", type=int, default=832)
     p.add_argument("--num-frames", type=int, default=17)
     p.add_argument("--num-steps", type=int, default=30)
-    p.add_argument("--guidance-scale", type=float, default=5.)
+    p.add_argument("--guidance-scale", type=float, default=5.0)
     p.add_argument("--fps", type=int, default=8)
     p.add_argument("--policy-device", default="cuda:0")
     p.add_argument("--reward-device", default="cuda:1")
@@ -85,9 +90,14 @@ def parse_args(argv=None):
     if "VIDEO_REWARD_CKPT_PATH" not in os.environ:
         p.error("Set VIDEO_REWARD_CKPT_PATH to the local scorer tree")
     root = Path(os.environ["VIDEO_REWARD_CKPT_PATH"])
-    for relative in ("depth-anything-3-large-v1.1/model.safetensors", "waft_tar_c_t.pth",
-                     "dinov2-base/config.json", "VideoReward/model_config.json",
-                     "Qwen2-VL-2B-Instruct/config.json", "VideoAlign/inference.py"):
+    for relative in (
+        "depth-anything-3-large-v1.1/model.safetensors",
+        "waft_tar_c_t.pth",
+        "dinov2-base/config.json",
+        "VideoReward/model_config.json",
+        "Qwen2-VL-2B-Instruct/config.json",
+        "VideoAlign/inference.py",
+    ):
         if not (root / relative).is_file():
             p.error(f"Required local scorer input missing: {root / relative}")
     return a
@@ -98,7 +108,7 @@ def main(argv=None):
     prompts = [s.strip() for s in cfg.prompts.read_text().splitlines() if s.strip()]
     if len(prompts) < cfg.num_prompts:
         raise ValueError("Prompt file contains fewer prompts than requested")
-    prompts = prompts[:cfg.num_prompts]
+    prompts = prompts[: cfg.num_prompts]
     output = prepare_output(cfg.output_dir)
     run = None
     try:
@@ -118,29 +128,45 @@ def main(argv=None):
             return result.stdout.strip() if result.returncode == 0 else "unavailable"
 
         manifest = {
-            "arguments": vars(cfg), "prompts": prompts,
+            "arguments": vars(cfg),
+            "prompts": prompts,
             "seeds": [[i + offset for offset in cfg.seed_offsets] for i in range(len(prompts))],
-            "checkpoint_sha256": file_hash(cfg.policy), "prompt_file_sha256": file_hash(cfg.prompts),
-            "git_sha": git("rev-parse", "HEAD"), "git_status": git("status", "--porcelain"),
-            "packages": {k: importlib.metadata.version(k) for k in ["torch", "diffusers", "transformers", "peft", "wandb"]},
-            "model_files": {str(p.relative_to(cfg.model)): {"size_bytes": p.stat().st_size,
-                            "mtime_ns": p.stat().st_mtime_ns} for p in sorted(Path(cfg.model).rglob("*.safetensors"))},
-            "model_config_hashes": {str(p.relative_to(cfg.model)): file_hash(p)
-                                    for p in sorted(Path(cfg.model).rglob("*.json"))},
-            "precision": {"transformer": "bfloat16", "text_encoder": "bfloat16", "vae": "bfloat16",
-                          "initial_latents": "float32"},
-            "initial_latents": [], "conditions": selected_conditions(cfg.sampler),
+            "checkpoint_sha256": file_hash(cfg.policy),
+            "prompt_file_sha256": file_hash(cfg.prompts),
+            "git_sha": git("rev-parse", "HEAD"),
+            "git_status": git("status", "--porcelain"),
+            "packages": {
+                k: importlib.metadata.version(k) for k in ["torch", "diffusers", "transformers", "peft", "wandb"]
+            },
+            "model_files": {
+                str(p.relative_to(cfg.model)): {"size_bytes": p.stat().st_size, "mtime_ns": p.stat().st_mtime_ns}
+                for p in sorted(Path(cfg.model).rglob("*.safetensors"))
+            },
+            "model_config_hashes": {
+                str(p.relative_to(cfg.model)): file_hash(p) for p in sorted(Path(cfg.model).rglob("*.json"))
+            },
+            "precision": {
+                "transformer": "bfloat16",
+                "text_encoder": "bfloat16",
+                "vae": "bfloat16",
+                "initial_latents": "float32",
+            },
+            "initial_latents": [],
+            "conditions": selected_conditions(cfg.sampler),
             "expected_videos": len(prompts) * len(cfg.seed_offsets) * len(selected_conditions(cfg.sampler)),
             "status": "running",
         }
         state, checkpoint_metadata = load_adapter_checkpoint(cfg.policy, cfg.checkpoint_format, cfg.expected_update)
         manifest["checkpoint"] = checkpoint_metadata
         write_json(output / "manifest.json", manifest)
-        run = wandb.init(project=os.environ.get("WANDB_PROJECT", "diffusionopsd"),
-                         entity=os.environ.get("WANDB_ENTITY"),
-                         name=f"wan22-inference-{os.environ.get('SLURM_JOB_ID', output.name)}",
-                         dir=str(output), mode="offline", config={k: str(v) if isinstance(v, Path) else v
-                                                                for k, v in vars(cfg).items()})
+        run = wandb.init(
+            project=os.environ.get("WANDB_PROJECT", "diffusionopsd"),
+            entity=os.environ.get("WANDB_ENTITY"),
+            name=f"wan22-inference-{os.environ.get('SLURM_JOB_ID', output.name)}",
+            dir=str(output),
+            mode="offline",
+            config={k: str(v) if isinstance(v, Path) else v for k, v in vars(cfg).items()},
+        )
         run.config.update({"checkpoint": checkpoint_metadata, "checkpoint_sha256": manifest["checkpoint_sha256"]})
         manifest["wandb"] = {"id": run.id, "entity": run.entity, "project": run.project}
         write_json(output / "manifest.json", manifest)
@@ -158,11 +184,24 @@ def main(argv=None):
         pipe.transformer = policy
         for module in (policy, pipe.vae, pipe.text_encoder):
             module.eval().requires_grad_(False)
-        reward = GeoReward(load_depth_anything3(cfg.reward_device), load_waft(cfg.reward_device),
-                           load_dinov2(cfg.reward_device)).eval().requires_grad_(False)
+        reward = (
+            GeoReward(
+                load_depth_anything3(cfg.reward_device), load_waft(cfg.reward_device), load_dinov2(cfg.reward_device)
+            )
+            .eval()
+            .requires_grad_(False)
+        )
         judge = load_video_reward(cfg.reward_device, num_frames=8)
-        run_investigation(pipe, reward, judge, cfg, prompts, output,
-                          lambda: UniPCMultistepScheduler.from_config(scheduler_config), run)
+        run_investigation(
+            pipe,
+            reward,
+            judge,
+            cfg,
+            prompts,
+            output,
+            lambda: UniPCMultistepScheduler.from_config(scheduler_config),
+            run,
+        )
         manifest = json.loads((output / "manifest.json").read_text())
         manifest["status"] = "complete"
         write_json(output / "manifest.json", manifest)
@@ -171,8 +210,10 @@ def main(argv=None):
         run.finish()
     except Exception as exc:
         if not (output / "failure.json").exists():
-            write_json(output / "failure.json", {"phase": "setup_or_finalization", "error": str(exc),
-                                                 "error_type": type(exc).__name__})
+            write_json(
+                output / "failure.json",
+                {"phase": "setup_or_finalization", "error": str(exc), "error_type": type(exc).__name__},
+            )
         (output / "summary.json").unlink(missing_ok=True)
         if (output / "manifest.json").exists():
             manifest = json.loads((output / "manifest.json").read_text())

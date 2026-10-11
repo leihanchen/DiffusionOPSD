@@ -1,4 +1,5 @@
 """Standalone paired inference experiments; never imported by OPSD training."""
+
 from __future__ import annotations
 
 import csv
@@ -109,22 +110,33 @@ def generate_latents(pipe, roll, cfg, condition, initial, pe, ne, scheduler_fact
         if sampler == "euler":
             context = torch.autocast("cuda", dtype=torch.bfloat16) if initial.is_cuda else nullcontext()
             with context:
-                result = roll.rollout(pe.clone(), ne.clone(), initial.clone(), .278)
+                result = roll.rollout(pe.clone(), ne.clone(), initial.clone(), 0.278)
             latents = result.x0
         else:
             latents = pipe(
-                prompt_embeds=pe.clone(), negative_prompt_embeds=ne.clone(),
-                latents=initial.clone(), height=cfg.height, width=cfg.width,
-                num_frames=cfg.num_frames, num_inference_steps=cfg.num_steps,
-                guidance_scale=cfg.guidance_scale, output_type="latent", return_dict=False,
+                prompt_embeds=pe.clone(),
+                negative_prompt_embeds=ne.clone(),
+                latents=initial.clone(),
+                height=cfg.height,
+                width=cfg.width,
+                num_frames=cfg.num_frames,
+                num_inference_steps=cfg.num_steps,
+                guidance_scale=cfg.guidance_scale,
+                output_type="latent",
+                return_dict=False,
             )[0]
     trace = {
-        "sampler": sampler, "scheduler_class": type(pipe.scheduler).__name__,
+        "sampler": sampler,
+        "scheduler_class": type(pipe.scheduler).__name__,
         "scheduler_timesteps": pipe.scheduler.timesteps.detach().float().cpu().tolist(),
         "sigmas": pipe.scheduler.sigmas.detach().float().cpu().tolist(),
-        "model_timesteps": ((pipe.scheduler.sigmas[:-1] * 1000) if sampler == "euler"
-                            else pipe.scheduler.timesteps).detach().float().cpu().tolist(),
-        "input_latent_dtype": str(initial.dtype), "output_latent_dtype": str(latents.dtype),
+        "model_timesteps": ((pipe.scheduler.sigmas[:-1] * 1000) if sampler == "euler" else pipe.scheduler.timesteps)
+        .detach()
+        .float()
+        .cpu()
+        .tolist(),
+        "input_latent_dtype": str(initial.dtype),
+        "output_latent_dtype": str(latents.dtype),
         "transformer_input_cast": "autocast BF16" if sampler == "euler" else "native transformer dtype",
     }
     if latents.shape != initial.shape or not torch.isfinite(latents).all():
@@ -142,9 +154,11 @@ def summarize(rows, conditions=tuple(CONDITIONS)):
         group[row["condition"]] = row
     if not grouped or any(set(g) != set(conditions) for g in grouped.values()):
         raise ValueError("Cannot summarize incomplete condition pairs")
-    comparisons = [(name, left, right) for name, left, right in
-                   [("B-A", "B", "A"), ("C-A", "C", "A"), ("D-B", "D", "B")]
-                   if left in conditions and right in conditions]
+    comparisons = [
+        (name, left, right)
+        for name, left, right in [("B-A", "B", "A"), ("C-A", "C", "A"), ("D-B", "D", "B")]
+        if left in conditions and right in conditions
+    ]
     training_pairs = [pair for pair in comparisons if pair[0] in ("C-A", "D-B")]
     interaction = set(conditions) == set(CONDITIONS)
     paired = []
@@ -167,8 +181,10 @@ def summarize(rows, conditions=tuple(CONDITIONS)):
             per_prompt.setdefault(item["prompt_index"], []).append(value(item))
         return sum(sum(v) / len(v) for v in per_prompt.values()) / len(per_prompt)
 
-    means = {c: {k: prompt_mean([r for r in rows if r["condition"] == c], lambda r: r[k])
-                 for k in SCORES} for c in conditions}
+    means = {
+        c: {k: prompt_mean([r for r in rows if r["condition"] == c], lambda r: r[k]) for k in SCORES}
+        for c in conditions
+    }
     differences = {}
     for name in [c[0] for c in comparisons] + (["interaction"] if interaction else []):
         differences[name] = {k: prompt_mean(paired, lambda r: r["differences"][name][k]) for k in SCORES}
@@ -176,9 +192,15 @@ def summarize(rows, conditions=tuple(CONDITIONS)):
     for name, trained, base in training_pairs:
         pq = prompt_mean(paired, lambda r: r["training"][name]["p_q"])
         training[name] = {"p_q": pq, **success_table(means[base], {**means[trained], "p_q": pq})}
-    return {"status": "complete", "num_videos": len(rows), "means": means,
-            "differences": differences, "training": training, "pairs": paired,
-            "interpretation": "Descriptive paired generation-path comparisons; no significance claim."}
+    return {
+        "status": "complete",
+        "num_videos": len(rows),
+        "means": means,
+        "differences": differences,
+        "training": training,
+        "pairs": paired,
+        "interpretation": "Descriptive paired generation-path comparisons; no significance claim.",
+    }
 
 
 def write_review(output, rows, seed=2026, conditions=tuple(CONDITIONS)):
@@ -223,32 +245,47 @@ def run_investigation(pipe, reward, judge, cfg, prompts, output, scheduler_facto
     roll = WanRollout(pipe, cfg.num_steps, cfg.guidance_scale)
     devices = sorted({torch.device(x) for x in (cfg.policy_device, cfg.reward_device, cfg.vae_device)}, key=str)
     cuda_devices = [d for d in devices if d.type == "cuda"]
+
     def sync():
         for device in cuda_devices:
             torch.cuda.synchronize(device)
+
     current = {"phase": "initialization"}
     try:
         with torch.no_grad():
             for index, prompt in enumerate(prompts):
                 current = {"phase": "prompt_encoding", "prompt_index": index}
-                pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True,
-                                            device=cfg.policy_device)[:2]
+                pe, ne = pipe.encode_prompt(
+                    prompt, negative_prompt="", do_classifier_free_guidance=True, device=cfg.policy_device
+                )[:2]
                 shape = latent_shape_from_pipe(pipe, cfg.num_frames, cfg.height, cfg.width)
                 for offset in cfg.seed_offsets:
                     seed = index + offset
                     pair_id = f"prompt_{index:03d}_seed_{seed}"
-                    initial = torch.randn(shape, device=cfg.policy_device, dtype=torch.float32,
-                                          generator=torch.Generator(cfg.policy_device).manual_seed(seed))
+                    initial = torch.randn(
+                        shape,
+                        device=cfg.policy_device,
+                        dtype=torch.float32,
+                        generator=torch.Generator(cfg.policy_device).manual_seed(seed),
+                    )
                     torch.save(initial.cpu(), output / f"{pair_id}_initial.pt")
-                    hashes = {"initial_latent_hash": tensor_hash(initial), "prompt_embedding_hash": tensor_hash(pe),
-                              "negative_embedding_hash": tensor_hash(ne)}
+                    hashes = {
+                        "initial_latent_hash": tensor_hash(initial),
+                        "prompt_embedding_hash": tensor_hash(pe),
+                        "negative_embedding_hash": tensor_hash(ne),
+                    }
                     manifest_path = output / "manifest.json"
                     if manifest_path.exists():
                         manifest = json.loads(manifest_path.read_text())
-                        manifest["initial_latents"].append({
-                            "file": f"{pair_id}_initial.pt", "prompt_index": index, "seed": seed, **hashes,
-                            "file_sha256": file_hash(output / f"{pair_id}_initial.pt"),
-                        })
+                        manifest["initial_latents"].append(
+                            {
+                                "file": f"{pair_id}_initial.pt",
+                                "prompt_index": index,
+                                "seed": seed,
+                                **hashes,
+                                "file_sha256": file_hash(output / f"{pair_id}_initial.pt"),
+                            }
+                        )
                         write_json(manifest_path, manifest)
                     for condition in conditions:
                         current = {"phase": "generation", "prompt_index": index, "seed": seed, "condition": condition}
@@ -257,9 +294,14 @@ def run_investigation(pipe, reward, judge, cfg, prompts, output, scheduler_facto
                         for device in cuda_devices:
                             torch.cuda.reset_peak_memory_stats(device)
                         started = time.perf_counter()
-                        latents, trace = generate_latents(pipe, roll, cfg, condition, initial, pe, ne, scheduler_factory)
+                        latents, trace = generate_latents(
+                            pipe, roll, cfg, condition, initial, pe, ne, scheduler_factory
+                        )
                         clip = roll.decode01(latents)
-                        if clip.shape != (1, cfg.num_frames, 3, cfg.height, cfg.width) or not torch.isfinite(clip).all():
+                        if (
+                            clip.shape != (1, cfg.num_frames, 3, cfg.height, cfg.width)
+                            or not torch.isfinite(clip).all()
+                        ):
                             raise ValueError("Invalid decoded video")
                         geometry = reward(clip.to(cfg.reward_device))
                         quality = judge.score(clip[0].to(cfg.reward_device), prompt)
@@ -272,13 +314,25 @@ def run_investigation(pipe, reward, judge, cfg, prompts, output, scheduler_facto
                         name = f"{pair_id}_{condition}"
                         video = f"{name}.mp4"
                         save_video(clip[0], output / video, cfg.fps)
-                        for label, frame in [("first", 0), ("middle", cfg.num_frames // 2), ("last", cfg.num_frames - 1)]:
+                        for label, frame in [
+                            ("first", 0),
+                            ("middle", cfg.num_frames // 2),
+                            ("last", cfg.num_frames - 1),
+                        ]:
                             pixels = (clip[0, frame].clamp(0, 1) * 255).round().byte().permute(1, 2, 0).cpu().numpy()
                             Image.fromarray(pixels).save(output / f"{name}_{label}.png")
                         torch.save(latents.cpu(), output / f"{name}_final.pt")
-                        row = {"condition": condition, "prompt_index": index, "prompt": prompt, "seed": seed,
-                               "video": video, **hashes, **scores, "compute_seconds": compute_seconds,
-                               "duration_seconds": time.perf_counter() - started}
+                        row = {
+                            "condition": condition,
+                            "prompt_index": index,
+                            "prompt": prompt,
+                            "seed": seed,
+                            "video": video,
+                            **hashes,
+                            **scores,
+                            "compute_seconds": compute_seconds,
+                            "duration_seconds": time.perf_counter() - started,
+                        }
                         for device in cuda_devices:
                             row[f"{device}_peak_allocated_bytes"] = torch.cuda.max_memory_allocated(device)
                             row[f"{device}_peak_reserved_bytes"] = torch.cuda.max_memory_reserved(device)
@@ -293,14 +347,23 @@ def run_investigation(pipe, reward, judge, cfg, prompts, output, scheduler_facto
                         rows.append(row)
                         if wandb_run is not None:
                             import wandb
-                            video_media = wandb.Video(str(output / video), format="mp4",
-                                                      caption=f"{condition} | {prompt} | seed={seed}")
+
+                            video_media = wandb.Video(
+                                str(output / video), format="mp4", caption=f"{condition} | {prompt} | seed={seed}"
+                            )
                             media[index, seed, condition] = video_media
-                            wandb_run.log({"sample_index": len(rows), "condition": condition,
-                                           **{f"investigation/{condition}/{k}": v for k, v in scores.items()},
-                                           "investigation/compute_seconds": compute_seconds,
-                                           **{f"investigation/{k}": v for k, v in row.items() if "peak_" in k},
-                                           "investigation/video": video_media}, step=len(rows), commit=True)
+                            wandb_run.log(
+                                {
+                                    "sample_index": len(rows),
+                                    "condition": condition,
+                                    **{f"investigation/{condition}/{k}": v for k, v in scores.items()},
+                                    "investigation/compute_seconds": compute_seconds,
+                                    **{f"investigation/{k}": v for k, v in row.items() if "peak_" in k},
+                                    "investigation/video": video_media,
+                                },
+                                step=len(rows),
+                                commit=True,
+                            )
                         print(json.dumps({"event": "condition_complete", "completed": len(rows), **row}), flush=True)
                         del latents, clip, geometry, quality
         summary = summarize(rows, conditions)
@@ -309,18 +372,40 @@ def run_investigation(pipe, reward, judge, cfg, prompts, output, scheduler_facto
                 for name, metrics in summary[category].items():
                     for metric, value in metrics.items():
                         wandb_run.summary[f"investigation/{category}/{name}/{metric}"] = value
-            table = wandb.Table(columns=["prompt_index", "prompt", "seed", "comparison",
-                                         "base_video", "trained_video", *[f"delta/{k}" for k in SCORES],
-                                         "p_q", "geometry_up", "identity_ok", "quality_ok", "not_frozen", "all_pass"])
+            table = wandb.Table(
+                columns=[
+                    "prompt_index",
+                    "prompt",
+                    "seed",
+                    "comparison",
+                    "base_video",
+                    "trained_video",
+                    *[f"delta/{k}" for k in SCORES],
+                    "p_q",
+                    "geometry_up",
+                    "identity_ok",
+                    "quality_ok",
+                    "not_frozen",
+                    "all_pass",
+                ]
+            )
             for pair in summary["pairs"]:
                 index, seed = pair["prompt_index"], pair["seed"]
                 for name, checks in pair["training"].items():
                     trained, base = name.split("-")
-                    table.add_data(index, prompts[index], seed, name, media[index, seed, base],
-                                   media[index, seed, trained],
-                                   *[pair["differences"][name][k] for k in SCORES],
-                                   *[checks[k] for k in ("p_q", "geometry_up", "identity_ok", "quality_ok",
-                                                         "not_frozen", "all_pass")])
+                    table.add_data(
+                        index,
+                        prompts[index],
+                        seed,
+                        name,
+                        media[index, seed, base],
+                        media[index, seed, trained],
+                        *[pair["differences"][name][k] for k in SCORES],
+                        *[
+                            checks[k]
+                            for k in ("p_q", "geometry_up", "identity_ok", "quality_ok", "not_frozen", "all_pass")
+                        ],
+                    )
             wandb_run.log({"investigation/pairs": table}, step=len(rows) + 1, commit=True)
             wandb_run.summary["investigation/num_videos"] = len(rows)
             wandb_run.summary["investigation/num_pairs"] = len(summary["pairs"])
@@ -328,6 +413,8 @@ def run_investigation(pipe, reward, judge, cfg, prompts, output, scheduler_facto
         write_json(output / "summary.json", summary)
         return summary
     except Exception as exc:
-        write_json(output / "failure.json", {**current, "completed": len(rows),
-                                             "error_type": type(exc).__name__, "error": str(exc)})
+        write_json(
+            output / "failure.json",
+            {**current, "completed": len(rows), "error_type": type(exc).__name__, "error": str(exc)},
+        )
         raise

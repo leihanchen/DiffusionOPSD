@@ -3,6 +3,7 @@
 
 Single-node: policy on cuda:0, rewards on cuda:1.
 """
+
 from __future__ import annotations
 
 import copy
@@ -77,14 +78,14 @@ def main(_):
     install_wandb_jsonl_tee(wandb, os.path.join(cfg.logdir, "metrics.jsonl"))
     dev = "cuda:0"
     model_path = os.path.expandvars(cfg.pretrained.model)
-    pipe = WanPipeline.from_pretrained(
-        model_path, torch_dtype=torch.bfloat16, local_files_only=True
-    ).to(dev)
+    pipe = WanPipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16, local_files_only=True).to(dev)
     pipe.vae.requires_grad_(False)
     pipe.vae.to(getattr(cfg, "vae_device", dev))
     pipe.text_encoder.requires_grad_(False)
-    print(json.dumps({"policy_device": dev, "vae_device": str(pipe.vae.device),
-                      "reward_device": cfg.reward_device}), flush=True)
+    print(
+        json.dumps({"policy_device": dev, "vae_device": str(pipe.vae.device), "reward_device": cfg.reward_device}),
+        flush=True,
+    )
     from diffusionopsd.video.wan_geometry import require_expand_timesteps
 
     require_expand_timesteps(pipe, model_path)
@@ -99,14 +100,14 @@ def main(_):
         policy.enable_gradient_checkpointing()
         behavior = copy.deepcopy(policy).requires_grad_(False)
     trainable = [param for param in policy.parameters() if param.requires_grad]
-    opt = torch.optim.AdamW(
-        trainable, lr=cfg.train.learning_rate, weight_decay=cfg.train.adam_weight_decay
-    )
-    ema = None if cfg.use_lora else EMAModuleWrapper(
-        policy.parameters(), decay=0.99, update_step_interval=1, device=dev
+    opt = torch.optim.AdamW(trainable, lr=cfg.train.learning_rate, weight_decay=cfg.train.adam_weight_decay)
+    ema = (
+        None if cfg.use_lora else EMAModuleWrapper(policy.parameters(), decay=0.99, update_step_interval=1, device=dev)
     )
     roll_old = WanRollout(
-        pipe, cfg.sample.num_steps, cfg.sample.guidance_scale,
+        pipe,
+        cfg.sample.num_steps,
+        cfg.sample.guidance_scale,
         offload_vae_activations=bool(getattr(cfg, "offload_vae_activations", False)),
     )
     reward = GeoReward(
@@ -128,9 +129,7 @@ def main(_):
     refs, s_ids, motions = {}, [], []
     with torch.no_grad():
         for prompt in random.Random(0).sample(prompts, min(cfg.gates.calib_prompts, len(prompts))):
-            pe, ne = pipe.encode_prompt(
-                prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev
-            )[:2]
+            pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev)[:2]
             g = torch.Generator(dev).manual_seed(_prompt_seed(prompt))
             latents = torch.randn(_latent_shape(pipe, cfg), device=dev, dtype=torch.float32, generator=g)
             with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -141,9 +140,7 @@ def main(_):
             s_ids.append(out.s_id.cpu())
             motions.append(out.motion.cpu())
     tau_id = cfg.gates.tau_id if cfg.gates.tau_id >= 0 else percentile_threshold(torch.cat(s_ids), 0.10)
-    tau_motion = (
-        cfg.gates.tau_motion if cfg.gates.tau_motion >= 0 else percentile_threshold(torch.cat(motions), 0.10)
-    )
+    tau_motion = cfg.gates.tau_motion if cfg.gates.tau_motion >= 0 else percentile_threshold(torch.cat(motions), 0.10)
     print(json.dumps({"tau_id": tau_id, "tau_motion": tau_motion, "tau_q": cfg.gates.tau_q}))
 
     if evaluation_due(0, cfg.num_epochs, cfg.eval_freq):
@@ -160,15 +157,11 @@ def main(_):
         else:
             pipe.transformer = behavior
         for prompt in batch_prompts:
-            pe, ne = pipe.encode_prompt(
-                prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev
-            )[:2]
+            pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev)[:2]
             if prompt not in refs:
                 with torch.no_grad():
                     g = torch.Generator(dev).manual_seed(_prompt_seed(prompt))
-                    latents = torch.randn(
-                        _latent_shape(pipe, cfg), device=dev, dtype=torch.float32, generator=g
-                    )
+                    latents = torch.randn(_latent_shape(pipe, cfg), device=dev, dtype=torch.float32, generator=g)
                     with torch.autocast("cuda", dtype=torch.bfloat16):
                         rec_ref = roll_old.rollout(pe, ne, latents, cfg.opa.query_sigma)
                     refs[prompt] = roll_old.decode01(rec_ref.x0)[0].cpu()
@@ -179,9 +172,7 @@ def main(_):
                 with torch.no_grad():
                     clip = roll_old.decode01(rec.x0)
                     out = reward(clip.to(cfg.reward_device))
-                    p_q = judge.p_win(
-                        clip[0].to(cfg.judge.device), refs[prompt].to(cfg.judge.device), prompt
-                    )
+                    p_q = judge.p_win(clip[0].to(cfg.judge.device), refs[prompt].to(cfg.judge.device), prompt)
                 tuples.append(
                     {
                         "prompt": prompt,
@@ -217,12 +208,8 @@ def main(_):
             yg = y0.clone().requires_grad_(True)
             (g0,) = torch.autograd.grad(R_geo(yg).sum(), yg)
             t["y0"] = y0
-            t["y_plus"] = opa_tr_step_nd(
-                y0, R_geo, cfg.opa.rho, cfg.opa.n_ascent, cfg.opa.eta, +1.0, first_grad=g0
-            )
-            t["y_minus"] = opa_tr_step_nd(
-                y0, R_geo, cfg.opa.rho, cfg.opa.n_ascent, cfg.opa.eta, -1.0, first_grad=g0
-            )
+            t["y_plus"] = opa_tr_step_nd(y0, R_geo, cfg.opa.rho, cfg.opa.n_ascent, cfg.opa.eta, +1.0, first_grad=g0)
+            t["y_minus"] = opa_tr_step_nd(y0, R_geo, cfg.opa.rho, cfg.opa.n_ascent, cfg.opa.eta, -1.0, first_grad=g0)
             kept.append(t)
         if cfg.use_lora:
             policy.set_adapter("default")
@@ -255,8 +242,7 @@ def main(_):
         grad_norm = torch.nn.utils.clip_grad_norm_(trainable, cfg.train.max_grad_norm)
         if cfg.debug and (not torch.isfinite(grad_norm) or grad_norm <= 0):
             raise RuntimeError(
-                f"Debug run did not produce finite nonzero gradients: "
-                f"n_kept={len(kept)}, grad_norm={float(grad_norm)}"
+                f"Debug run did not produce finite nonzero gradients: n_kept={len(kept)}, grad_norm={float(grad_norm)}"
             )
         opt.step()
         if cfg.debug:
@@ -274,9 +260,7 @@ def main(_):
             "epoch": epoch,
             "optimizer_updates": epoch + 1,
             "train/rl_distillation_loss": mean_distillation_loss,
-            "train/optimization_loss": (
-                mean_distillation_loss * cfg.train.adv_clip_max if kept else None
-            ),
+            "train/optimization_loss": (mean_distillation_loss * cfg.train.adv_clip_max if kept else None),
             "grad_norm": float(grad_norm),
             "n_rollouts": len(tuples),
             "n_kept": len(kept),
@@ -294,7 +278,7 @@ def main(_):
                 state = get_peft_model_state_dict(policy, adapter_name="default")
             else:
                 state = policy.state_dict()
-            checkpoint_path = os.path.join(cfg.logdir, f"policy_{epoch+1}.pt")
+            checkpoint_path = os.path.join(cfg.logdir, f"policy_{epoch + 1}.pt")
             torch.save(state, checkpoint_path)
             print(json.dumps({"checkpoint_saved": checkpoint_path}), flush=True)
             del state

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Held-out comparison of a tuned policy against the base model on the same prompts and seeds."""
+
 from __future__ import annotations
 
 import argparse
@@ -40,9 +41,7 @@ def _latent_shape(pipe, cfg):
 
 
 def _gen(pipe, roll, cfg, prompt, seed, dev):
-    pe, ne = pipe.encode_prompt(
-        prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev
-    )[:2]
+    pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev)[:2]
     shape = _latent_shape(pipe, cfg)
     gen = torch.Generator(dev).manual_seed(seed)
     z = torch.randn(shape, device=dev, dtype=torch.float32, generator=gen)
@@ -60,9 +59,7 @@ def main():
     a = p.parse_args()
     cfg = _get_config(a.config)
     dev = "cuda:0"
-    pipe = WanPipeline.from_pretrained(
-        os.path.expandvars(cfg.pretrained.model), torch_dtype=torch.bfloat16
-    ).to(dev)
+    pipe = WanPipeline.from_pretrained(os.path.expandvars(cfg.pretrained.model), torch_dtype=torch.bfloat16).to(dev)
     from diffusionopsd.video.wan_geometry import require_expand_timesteps
 
     require_expand_timesteps(pipe, os.path.expandvars(cfg.pretrained.model))
@@ -72,9 +69,7 @@ def main():
 
         pipe.transformer.requires_grad_(False)
         policy = attach_lora(pipe.transformer, None)
-        set_peft_model_state_dict(
-            policy, torch.load(a.policy, map_location="cpu"), adapter_name="default"
-        )
+        set_peft_model_state_dict(policy, torch.load(a.policy, map_location="cpu"), adapter_name="default")
         policy.set_adapter("default")
         pipe.transformer = policy
     else:
@@ -112,9 +107,7 @@ def main():
             for k in ("geo", "s_id", "motion"):
                 acc["base"][k].append(float(getattr(ob, k)))
                 acc["tuned"][k].append(float(getattr(ot, k)))
-            acc["tuned"]["p_q"].append(
-                judge.p_win(ct[0].to(cfg.judge.device), cb[0].to(cfg.judge.device), prompt)
-            )
+            acc["tuned"]["p_q"].append(judge.p_win(ct[0].to(cfg.judge.device), cb[0].to(cfg.judge.device), prompt))
     means = {s: {k: sum(v) / len(v) for k, v in d.items()} for s, d in acc.items()}
     result = {"n": len(prompts), "means": means, "success": success_table(means["base"], means["tuned"])}
     with open(a.out, "w") as out_f:

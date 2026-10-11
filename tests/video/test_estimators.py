@@ -33,9 +33,7 @@ class _Prediction:
     def __init__(self, pose_rows=4):
         self.depth = torch.ones(2, 4, 6).numpy()
         self.conf = torch.full((2, 4, 6), 2.0).numpy()
-        self.intrinsics = torch.tensor(
-            [[[6.0, 0.0, 3.0], [0.0, 4.0, 2.0], [0.0, 0.0, 1.0]]] * 2
-        ).numpy()
+        self.intrinsics = torch.tensor([[[6.0, 0.0, 3.0], [0.0, 4.0, 2.0], [0.0, 0.0, 1.0]]] * 2).numpy()
         w2c = torch.eye(4).repeat(2, 1, 1)
         w2c[1, 0, 3] = -0.2
         self.extrinsics = w2c[:, :pose_rows].numpy()

@@ -14,9 +14,7 @@ import os
 from pathlib import Path
 
 
-PUBLIC_REWARDS = {
-    "hpsv2", "clipscore", "pickscore", "aesthetic", "imagereward", "hpsv3", "deqa", "open3"
-}
+PUBLIC_REWARDS = {"hpsv2", "clipscore", "pickscore", "aesthetic", "imagereward", "hpsv3", "deqa", "open3"}
 
 
 def _require_module(name: str, hint: str) -> object:

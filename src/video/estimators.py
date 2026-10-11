@@ -14,9 +14,9 @@ _IMNET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 class DepthOutput(NamedTuple):
     depth: torch.Tensor  # [B,T,H,W]
-    K: torch.Tensor      # [B,3,3]
+    K: torch.Tensor  # [B,3,3]
     poses: torch.Tensor  # [B,T,4,4] camera-to-world
-    conf: torch.Tensor   # [B,T,H,W] in [0,1]
+    conf: torch.Tensor  # [B,T,H,W] in [0,1]
 
 
 class DepthEstimator(Protocol):
@@ -99,17 +99,19 @@ def _waft_state_dict(sd):
         sd = sd["model"]
     elif isinstance(sd, dict) and "state_dict" in sd and isinstance(sd["state_dict"], dict):
         sd = sd["state_dict"]
-    return {(k[len("module."):] if k.startswith("module.") else k): v for k, v in sd.items()}
+    return {(k[len("module.") :] if k.startswith("module.") else k): v for k, v in sd.items()}
 
 
 def load_waft(device) -> FlowEstimator:
     import sys
+
     root = os.path.join(_ckpt_root(), "WAFT")
     if root not in sys.path:
         sys.path.insert(0, root)
     # a1 code resolves depth-anything-ckpts/ relative to the WAFT checkout.
     from config.parser import json_to_args
     from model import fetch_model
+
     cfg = os.path.join(root, "config", "tar-c-t.json")
     if not os.path.isfile(cfg):
         cfg = os.path.join(root, "config", "a1", "tar-c-t.json")
@@ -199,8 +201,7 @@ class DepthAnything3(torch.nn.Module):
                 w2c = homogeneous
             elif w2c.shape != (T, 4, 4):
                 raise RuntimeError(
-                    f"DA3 returned extrinsics with shape {tuple(w2c.shape)}, "
-                    f"expected [{T},3,4] or [{T},4,4]"
+                    f"DA3 returned extrinsics with shape {tuple(w2c.shape)}, expected [{T},3,4] or [{T},4,4]"
                 )
             poses_list.append(torch.linalg.inv(w2c))
         return DepthOutput(
@@ -218,13 +219,9 @@ def load_depth_anything3(device) -> DepthEstimator:
     weights = os.path.join(path, "model.safetensors")
     if not os.path.isfile(weights):
         raise FileNotFoundError(
-            f"Local Depth Anything 3 weights missing: {weights}. "
-            "Run scripts/prefetch_wan22_login.sh on a login node."
+            f"Local Depth Anything 3 weights missing: {weights}. Run scripts/prefetch_wan22_login.sh on a login node."
         )
-    saved = {
-        key: os.environ.get(key)
-        for key in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_DATASETS_OFFLINE")
-    }
+    saved = {key: os.environ.get(key) for key in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_DATASETS_OFFLINE")}
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["HF_DATASETS_OFFLINE"] = "1"

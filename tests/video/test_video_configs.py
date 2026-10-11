@@ -24,5 +24,5 @@ def test_ti2v_uses_720p_training_grid_and_lora():
 def test_eval_and_probe_can_select_wan22():
     ev = Path("scripts/eval_video_consistency.py").read_text()
     pr = Path("scripts/probe_fixed_suffix_video.py").read_text()
-    assert '--config' in ev and "wan22_ti2v" in ev and "disable_adapter" in ev
-    assert '--config' in pr and "wan22_ti2v" in pr and "if not cfg.use_lora" in pr
+    assert "--config" in ev and "wan22_ti2v" in ev and "disable_adapter" in ev
+    assert "--config" in pr and "wan22_ti2v" in pr and "if not cfg.use_lora" in pr

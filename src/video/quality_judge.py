@@ -146,6 +146,4 @@ def load_video_reward(device, num_frames: int = 8) -> VideoRewardJudge:
         inferencer = VideoVLMRewardInference(ckpt, device=device, dtype=torch.bfloat16)
     inferencer.model.requires_grad_(False)
     inferencer.model.eval()
-    return VideoRewardJudge(
-        _VideoAlignScorer(inferencer, build_prompt, process_vision_info), num_frames=num_frames
-    )
+    return VideoRewardJudge(_VideoAlignScorer(inferencer, build_prompt, process_vision_info), num_frames=num_frames)

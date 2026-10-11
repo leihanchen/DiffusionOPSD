@@ -90,7 +90,7 @@ class EvaluationMonitor:
         prompts = [line.strip() for line in Path(cfg.eval_prompts).read_text().splitlines() if line.strip()]
         if len(prompts) < cfg.eval_num_prompts:
             raise ValueError(f"evaluation requested {cfg.eval_num_prompts} prompts but found {len(prompts)}")
-        self.prompts = prompts[:cfg.eval_num_prompts]
+        self.prompts = prompts[: cfg.eval_num_prompts]
 
     def evaluate(self, pipe, policy, roll, reward, judge, update):
         if not self.prompts:
@@ -129,8 +129,15 @@ class EvaluationMonitor:
         metrics.update({f"eval/{key}_delta": means[key] - base_means[key] for key in keys})
         metrics.update({f"eval/{key}": value for key, value in success.items()})
         metrics.update({"eval/num_prompts": len(rows), "eval/duration_seconds": time.perf_counter() - started})
-        result = {"optimizer_updates": update, "prompts": rows, "means": means,
-                  "baseline_means": base_means, "success": success, "metrics": metrics, "videos": videos}
+        result = {
+            "optimizer_updates": update,
+            "prompts": rows,
+            "means": means,
+            "baseline_means": base_means,
+            "success": success,
+            "metrics": metrics,
+            "videos": videos,
+        }
         (output / f"update_{update:06d}.json").write_text(json.dumps(result, indent=2) + "\n")
         # Publish a baseline only after every prompt and output has succeeded.
         if self.baseline is None:

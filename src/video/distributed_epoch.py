@@ -35,7 +35,7 @@ def prompt_schedule(prompts: list[str], nonce: int, workers: int) -> list[int]:
 
 
 def split_update(order: list[int], update: int, rank: int, workers: int) -> list[int]:
-    return order[update * workers + rank:update * workers + rank + 1]
+    return order[update * workers + rank : update * workers + rank + 1]
 
 
 def deterministic_seed(nonce: int, prompt_index: int, repetition: int) -> int:
@@ -62,8 +62,9 @@ def load_checkpoint(path: Path, prompt_hash: str, config_hash: str) -> dict:
     return state
 
 
-def should_start_update(completed: int, total: int, elapsed: float,
-                        max_update_seconds: float | None, budget: float) -> bool:
+def should_start_update(
+    completed: int, total: int, elapsed: float, max_update_seconds: float | None, budget: float
+) -> bool:
     if completed >= total:
         return False
     if completed == 0:

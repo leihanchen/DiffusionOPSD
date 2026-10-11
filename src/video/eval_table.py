@@ -1,4 +1,5 @@
 """Spec Sec. 7 automatic success criteria."""
+
 from __future__ import annotations
 
 

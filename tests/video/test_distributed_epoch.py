@@ -42,8 +42,12 @@ def test_epoch_preset_has_50_updates_and_three_evaluations():
 
 def test_atomic_checkpoint_validates_identity_and_preserves_previous(tmp_path):
     path = tmp_path / "state.pt"
-    state = {"next_update": 8, "prompt_hash": "prompt-v1", "config_hash": "config-v1",
-             "optimizer": {"moment": torch.tensor([2.0])}}
+    state = {
+        "next_update": 8,
+        "prompt_hash": "prompt-v1",
+        "config_hash": "config-v1",
+        "optimizer": {"moment": torch.tensor([2.0])},
+    }
     atomic_checkpoint(path, state)
     assert load_checkpoint(path, "prompt-v1", "config-v1")["next_update"] == 8
     assert not list(tmp_path.glob("*.tmp"))
@@ -51,8 +55,7 @@ def test_atomic_checkpoint_validates_identity_and_preserves_previous(tmp_path):
         load_checkpoint(path, "prompt-v2", "config-v1")
     with pytest.raises(ValueError, match="config"):
         load_checkpoint(path, "prompt-v1", "config-v2")
-    assert torch.equal(load_checkpoint(path, "prompt-v1", "config-v1")["optimizer"]["moment"],
-                       torch.tensor([2.0]))
+    assert torch.equal(load_checkpoint(path, "prompt-v1", "config-v1")["optimizer"]["moment"], torch.tensor([2.0]))
 
 
 def test_job_budget_stops_before_another_update():
@@ -84,15 +87,14 @@ def test_active_cuda_devices_deduplicates_shared_vae_and_rejects_missing_gpu():
 
     from diffusionopsd.video.distributed_epoch import active_cuda_devices
 
-    cfg = SimpleNamespace(vae_device='cuda:1', reward_device='cuda:1',
-                          judge=SimpleNamespace(device='cuda:1'))
+    cfg = SimpleNamespace(vae_device="cuda:1", reward_device="cuda:1", judge=SimpleNamespace(device="cuda:1"))
     assert active_cuda_devices(cfg, available_count=2) == (0, 1)
-    cfg.vae_device = 'cuda:2'
+    cfg.vae_device = "cuda:2"
     assert active_cuda_devices(cfg, available_count=3) == (0, 1, 2)
-    with pytest.raises(ValueError, match='visible'):
+    with pytest.raises(ValueError, match="visible"):
         active_cuda_devices(cfg, available_count=2)
-    cfg.vae_device = 'cpu'
-    with pytest.raises(ValueError, match='explicit CUDA'):
+    cfg.vae_device = "cpu"
+    with pytest.raises(ValueError, match="explicit CUDA"):
         active_cuda_devices(cfg, available_count=2)
 
 
@@ -102,6 +104,6 @@ def test_two_gpu_epoch_preset_preserves_training_settings():
 
     original = three_gpu_config().to_dict()
     shared = two_gpu_config().to_dict()
-    assert shared['vae_device'] == shared['reward_device'] == shared['judge']['device'] == 'cuda:1'
-    shared['vae_device'] = original['vae_device']
+    assert shared["vae_device"] == shared["reward_device"] == shared["judge"]["device"] == "cuda:1"
+    shared["vae_device"] = original["vae_device"]
     assert shared == original

@@ -1,6 +1,11 @@
 import torch
 from diffusionopsd.video.gates import (
-    identity_keep, motion_mask, quality_mask, endpoint_weight, effective_weight, percentile_threshold,
+    identity_keep,
+    motion_mask,
+    quality_mask,
+    endpoint_weight,
+    effective_weight,
+    percentile_threshold,
 )
 
 
@@ -22,8 +27,9 @@ def test_endpoint_weight_matches_repo_r1():
 
 def test_effective_weight_is_hard_masked():
     adv = torch.tensor([5.0, 5.0, 5.0])
-    w = effective_weight(adv, 5.0, m=torch.tensor([1.0, 0.0, 1.0]), tau_motion=0.5,
-                         p_q=torch.tensor([0.9, 0.9, 0.1]), tau_q=0.4)
+    w = effective_weight(
+        adv, 5.0, m=torch.tensor([1.0, 0.0, 1.0]), tau_motion=0.5, p_q=torch.tensor([0.9, 0.9, 0.1]), tau_q=0.4
+    )
     assert w.tolist() == [1.0, 0.0, 0.0]
 
 

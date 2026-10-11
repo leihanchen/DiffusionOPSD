@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Same-query probe: G_construct, alignment, G_realized, G_fit with the geometry reward on a Wan 2.1 policy."""
+
 from __future__ import annotations
 
 import argparse

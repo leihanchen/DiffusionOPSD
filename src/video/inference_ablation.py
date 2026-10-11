@@ -1,4 +1,5 @@
 """Base Wan native-UniPC ablations; independent of OPSD training."""
+
 from __future__ import annotations
 
 import csv
@@ -22,7 +23,10 @@ CONDITIONS = ("control", "steps30", "resolution480")
 def validate_experiment(config):
     """Reject accidental changes to the agreed one-factor comparisons."""
     expected = {
-        "num_frames": 121, "guidance_scale": 5.0, "fps": 8, "seeds": [0, 1000],
+        "num_frames": 121,
+        "guidance_scale": 5.0,
+        "fps": 8,
+        "seeds": [0, 1000],
         "conditions": {
             "control": {"height": 704, "width": 1280, "num_steps": 50},
             "steps30": {"height": 704, "width": 1280, "num_steps": 30},
@@ -43,17 +47,33 @@ def summarize(rows, seeds):
         grouped[seed][condition] = row
     if not grouped or any(set(group) != set(CONDITIONS) for group in grouped.values()):
         raise ValueError("Incomplete ablation")
-    pairs = [{"seed": seed, "differences": {
-        name: {metric: group[name][metric] - group["control"][metric] for metric in SCORES}
-        for name in CONDITIONS[1:]}} for seed, group in grouped.items()]
-    means = {name: {metric: sum(g[name][metric] for g in grouped.values()) / len(grouped)
-                    for metric in SCORES} for name in CONDITIONS}
-    differences = {name: {metric: sum(p["differences"][name][metric] for p in pairs) / len(pairs)
-                          for metric in SCORES} for name in CONDITIONS[1:]}
-    return {"status": "complete", "num_videos": len(rows), "means": means,
-            "differences": differences, "pairs": pairs,
-            "interpretation": "One prompt, two seeds; descriptive results. Resolution changes noise shape and "
-                              "pixel-based motion/geometry scales; raw differences need visual interpretation."}
+    pairs = [
+        {
+            "seed": seed,
+            "differences": {
+                name: {metric: group[name][metric] - group["control"][metric] for metric in SCORES}
+                for name in CONDITIONS[1:]
+            },
+        }
+        for seed, group in grouped.items()
+    ]
+    means = {
+        name: {metric: sum(g[name][metric] for g in grouped.values()) / len(grouped) for metric in SCORES}
+        for name in CONDITIONS
+    }
+    differences = {
+        name: {metric: sum(p["differences"][name][metric] for p in pairs) / len(pairs) for metric in SCORES}
+        for name in CONDITIONS[1:]
+    }
+    return {
+        "status": "complete",
+        "num_videos": len(rows),
+        "means": means,
+        "differences": differences,
+        "pairs": pairs,
+        "interpretation": "One prompt, two seeds; descriptive results. Resolution changes noise shape and "
+        "pixel-based motion/geometry scales; raw differences need visual interpretation.",
+    }
 
 
 @torch.no_grad()
@@ -71,8 +91,9 @@ def run_ablation(pipe, reward, judge, cfg, experiment, prompt, output, scheduler
 
     current = {"phase": "prompt_encoding"}
     try:
-        pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True,
-                                   device=cfg.policy_device)[:2]
+        pe, ne = pipe.encode_prompt(
+            prompt, negative_prompt="", do_classifier_free_guidance=True, device=cfg.policy_device
+        )[:2]
         for seed in experiment["seeds"]:
             noises = {}
             for condition in CONDITIONS:
@@ -83,23 +104,38 @@ def run_ablation(pipe, reward, judge, cfg, experiment, prompt, output, scheduler
                 print(json.dumps({"event": "condition_start", **current}), flush=True)
                 shape = latent_shape_from_pipe(pipe, frames, height, width)
                 if shape not in noises:
-                    noise = torch.randn(shape, device=cfg.policy_device, dtype=torch.float32,
-                                        generator=torch.Generator(cfg.policy_device).manual_seed(seed))
+                    noise = torch.randn(
+                        shape,
+                        device=cfg.policy_device,
+                        dtype=torch.float32,
+                        generator=torch.Generator(cfg.policy_device).manual_seed(seed),
+                    )
                     noise_file = f"seed_{seed}_{width}x{height}_initial.pt"
                     torch.save(noise.cpu(), output / noise_file)
                     noises[shape] = noise, noise_file
                 initial, noise_file = noises[shape]
-                hashes = {"initial_latent_hash": tensor_hash(initial), "prompt_embedding_hash": tensor_hash(pe),
-                          "negative_embedding_hash": tensor_hash(ne)}
+                hashes = {
+                    "initial_latent_hash": tensor_hash(initial),
+                    "prompt_embedding_hash": tensor_hash(pe),
+                    "negative_embedding_hash": tensor_hash(ne),
+                }
                 pipe.scheduler = scheduler_factory()
                 sync()
                 for device in cuda_devices:
                     torch.cuda.reset_peak_memory_stats(device)
                 started = time.perf_counter()
-                latents = pipe(prompt_embeds=pe.clone(), negative_prompt_embeds=ne.clone(),
-                               latents=initial.clone(), height=height, width=width, num_frames=frames,
-                               num_inference_steps=steps, guidance_scale=experiment["guidance_scale"],
-                               output_type="latent", return_dict=False)[0]
+                latents = pipe(
+                    prompt_embeds=pe.clone(),
+                    negative_prompt_embeds=ne.clone(),
+                    latents=initial.clone(),
+                    height=height,
+                    width=width,
+                    num_frames=frames,
+                    num_inference_steps=steps,
+                    guidance_scale=experiment["guidance_scale"],
+                    output_type="latent",
+                    return_dict=False,
+                )[0]
                 if latents.shape != initial.shape or not torch.isfinite(latents).all():
                     raise ValueError("Invalid generated latents")
                 current["phase"] = "decode"
@@ -123,16 +159,29 @@ def run_ablation(pipe, reward, judge, cfg, experiment, prompt, output, scheduler
                     pixels = (clip[0, frame] * 255).round().byte().permute(1, 2, 0).cpu().numpy()
                     Image.fromarray(pixels).save(output / f"{name}_{label}.png")
                 torch.save(latents.cpu(), output / f"{name}_final.pt")
-                row = {"condition": condition, "seed": seed, "prompt": prompt, **params,
-                       "num_frames": frames, "guidance_scale": experiment["guidance_scale"],
-                       "video": video, "initial_latents": noise_file, **hashes, **scores,
-                       "compute_seconds": compute_seconds, "duration_seconds": time.perf_counter() - started}
+                row = {
+                    "condition": condition,
+                    "seed": seed,
+                    "prompt": prompt,
+                    **params,
+                    "num_frames": frames,
+                    "guidance_scale": experiment["guidance_scale"],
+                    "video": video,
+                    "initial_latents": noise_file,
+                    **hashes,
+                    **scores,
+                    "compute_seconds": compute_seconds,
+                    "duration_seconds": time.perf_counter() - started,
+                }
                 for device in cuda_devices:
                     row[f"{device}_peak_allocated_bytes"] = torch.cuda.max_memory_allocated(device)
                     row[f"{device}_peak_reserved_bytes"] = torch.cuda.max_memory_reserved(device)
-                trace = {"sampler": "native", "scheduler_class": type(pipe.scheduler).__name__,
-                         "timesteps": pipe.scheduler.timesteps.float().cpu().tolist(),
-                         "sigmas": pipe.scheduler.sigmas.float().cpu().tolist()}
+                trace = {
+                    "sampler": "native",
+                    "scheduler_class": type(pipe.scheduler).__name__,
+                    "timesteps": pipe.scheduler.timesteps.float().cpu().tolist(),
+                    "sigmas": pipe.scheduler.sigmas.float().cpu().tolist(),
+                }
                 write_json(output / f"{name}.json", {**row, "trace": trace})
                 with (output / "samples.jsonl").open("a") as f:
                     f.write(json.dumps(row, allow_nan=False) + "\n")
@@ -144,14 +193,24 @@ def run_ablation(pipe, reward, judge, cfg, experiment, prompt, output, scheduler
                 rows.append(row)
                 current["phase"] = "wandb"
                 import wandb
-                caption = (f"base Wan2.2 | UniPC | {condition} | seed={seed} | {width}x{height} | "
-                           f"steps={steps} | frames={frames} | {prompt}")
-                wandb_run.log({"sample_index": len(rows), "condition": condition, "seed": seed,
-                               **{f"ablation/{condition}/{k}": v for k, v in scores.items()},
-                               **{f"ablation/{condition}/{k}": v for k, v in row.items()
-                                  if k.endswith(("_seconds", "_bytes"))},
-                               f"ablation/videos/{condition}": wandb.Video(str(output / video), format="mp4",
-                                                                          caption=caption)}, step=len(rows))
+
+                caption = (
+                    f"base Wan2.2 | UniPC | {condition} | seed={seed} | {width}x{height} | "
+                    f"steps={steps} | frames={frames} | {prompt}"
+                )
+                wandb_run.log(
+                    {
+                        "sample_index": len(rows),
+                        "condition": condition,
+                        "seed": seed,
+                        **{f"ablation/{condition}/{k}": v for k, v in scores.items()},
+                        **{
+                            f"ablation/{condition}/{k}": v for k, v in row.items() if k.endswith(("_seconds", "_bytes"))
+                        },
+                        f"ablation/videos/{condition}": wandb.Video(str(output / video), format="mp4", caption=caption),
+                    },
+                    step=len(rows),
+                )
                 print(json.dumps({"event": "condition_complete", **row}), flush=True)
                 del latents, clip, geometry, quality
         current = {"phase": "summary"}
@@ -163,6 +222,8 @@ def run_ablation(pipe, reward, judge, cfg, experiment, prompt, output, scheduler
         write_json(output / "summary.json", summary)
         return summary
     except Exception as exc:
-        write_json(output / "failure.json", {**current, "completed": len(rows),
-                                             "error_type": type(exc).__name__, "error": str(exc)})
+        write_json(
+            output / "failure.json",
+            {**current, "completed": len(rows), "error_type": type(exc).__name__, "error": str(exc)},
+        )
         raise
