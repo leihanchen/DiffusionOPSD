@@ -147,3 +147,43 @@ def test_container_launch_preserves_bound_devices_and_checkpoint_argument(tmp_pa
         ["bash", "-c", command, "scaled-worker"], env=environment, check=True, capture_output=True, text=True
     )
     assert not any(a.startswith("--resume_from=") for a in json.loads(result.stdout))
+
+
+def test_single_node_smoke_allocation_is_explicit_and_one_update():
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--nodes",
+            "1",
+            "--gpus-per-node",
+            "4",
+            "--single-node-smoke",
+            "--max-updates",
+            "1",
+            "--dry-run",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["world_size"] == 2
+    assert payload["global_rollouts"] == 16
+    assert "--nodes=1" in payload["command"]
+    assert "--ntasks=2" in payload["command"]
+    assert payload["environment"]["WAN_SCALE_SINGLE_NODE_SMOKE"] == "true"
+    assert payload["environment"]["WAN_EPOCH_CHAIN_JOBS"] == "0"
+    assert payload["environment"]["WAN_EPOCH_MAX_UPDATES"] == "1"
+
+
+@pytest.mark.parametrize(
+    "extra", [[], ["--single-node-smoke"], ["--single-node-smoke", "--max-updates", "1", "--chain"]]
+)
+def test_single_node_smoke_rejects_missing_mode_or_multi_update_or_chain(extra):
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--nodes", "1", "--gpus-per-node", "4", *extra, "--dry-run"],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode != 0

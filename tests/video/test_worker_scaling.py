@@ -178,7 +178,7 @@ def _uneven_gradient_worker(rank, rendezvous, result_dir, world):
 
     dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=world)
     parameter = torch.nn.Parameter(torch.tensor([1.0]))
-    # Same retained samples under either layout; rank zero has no retained sample.
+    # Same retained samples under every layout; four/eight-worker layouts include empty ranks.
     retained = [i for i in range(16) if i >= 4 and i % 3 and i // (16 // world) == rank]
     for sample in retained:
         (parameter * (sample + 1)).backward()
@@ -189,7 +189,7 @@ def _uneven_gradient_worker(rank, rendezvous, result_dir, world):
     dist.destroy_process_group()
 
 
-@pytest.mark.parametrize("workers", [4, 8])
+@pytest.mark.parametrize("workers", [2, 4, 8])
 def test_uneven_retention_gradients_match_serial_reference(tmp_path, workers):
     import torch
     import torch.multiprocessing as mp
@@ -209,3 +209,35 @@ def test_adapter_fingerprint_handles_bfloat16_and_order():
     assert adapter_fingerprint(state) == adapter_fingerprint(dict(reversed(list(state.items()))))
     state2 = {**state, "b": torch.tensor([3.0], dtype=torch.bfloat16)}
     assert adapter_fingerprint(state) != adapter_fingerprint(state2)
+
+
+def test_single_node_smoke_preserves_all_sixteen_samples():
+    from diffusionopsd.video.distributed_epoch import worker_sample_assignments
+
+    order = list(range(200))
+    gathered = []
+    for rank in range(2):
+        assignments = worker_sample_assignments(order, 4, rank, 2, single_node_smoke=True)
+        assert len(assignments) == 4
+        samples = [
+            {
+                "prompt_index": prompt,
+                "rollout_index": rollout,
+                "prompt": str(prompt),
+                "r": float(rollout),
+                "m": 1.0,
+                "p_q": 0.5,
+            }
+            for prompt, rollouts in assignments
+            for rollout in rollouts
+        ]
+        assert len(samples) == 8
+        gathered.append(samples)
+    canonical = canonical_samples(gathered, order, 4, 2, single_node_smoke=True)
+    assert [(s["prompt_index"], s["rollout_index"]) for s in canonical] == [
+        (prompt, rollout) for prompt in (16, 17, 18, 19) for rollout in range(4)
+    ]
+    with pytest.raises(ValueError):
+        worker_sample_assignments(order, 4, 0, 2)
+    with pytest.raises(ValueError):
+        worker_sample_assignments(order, 4, 0, 4, single_node_smoke=True)

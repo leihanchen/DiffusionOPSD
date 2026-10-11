@@ -32,6 +32,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--eval-freq", type=int, default=0, help="Override interval; 0 retains configured default")
     result.add_argument("--evaluate-on-resume", action="store_true")
     result.add_argument("--chain", action="store_true")
+    result.add_argument(
+        "--single-node-smoke", action="store_true", help="One node, two workers, one update; retains 16 rollouts"
+    )
     result.add_argument("--dry-run", action="store_true")
     result.add_argument("--dependency", default="")
     result.add_argument("--resubmit", default="", help="Internal successor: load saved launch options")
@@ -59,7 +62,10 @@ def build_submission(options: dict) -> dict:
     if nodes <= 0 or gpus not in (2, 4):
         raise ValueError("Invalid allocation: Narval requires positive nodes and 2 or 4 full A100 GPUs per node")
     per_node, world = gpus // 2, nodes * (gpus // 2)
-    if world not in (4, 8, 16):
+    smoke = options.get("single_node_smoke", False)
+    if smoke and (nodes != 1 or gpus != 4 or options["max_updates"] != 1 or options["chain"]):
+        raise ValueError("Single-node smoke requires one node, four GPUs, --max-updates 1, and no --chain")
+    if world not in ((2,) if smoke else (4, 8, 16)):
         raise ValueError("Invalid allocation: require 4, 8 or 16 two-GPU workers")
     if options["cpus_per_worker"] <= 0 or options["max_updates"] < 0 or options["eval_freq"] < 0:
         raise ValueError("Invalid CPU request or update/evaluation interval")
@@ -89,6 +95,7 @@ def build_submission(options: dict) -> dict:
         "WAN_SCALE_GPUS_PER_NODE": str(gpus),
         "WAN_SCALE_WORKERS_PER_NODE": str(per_node),
         "WAN_SCALE_WORLD_SIZE": str(world),
+        "WAN_SCALE_SINGLE_NODE_SMOKE": str(smoke).lower(),
         "WAN_SCALE_OPTIONS": str(run_dir / "launch_options.json"),
         "WAN_EPOCH_RUN_ID": run_id,
         "WAN_EPOCH_CONFIG": config,

@@ -108,19 +108,36 @@ def assign_rollouts(order: list[int], update: int, rank: int, workers: int) -> t
     return order[position], tuple(range(member * count, (member + 1) * count))
 
 
-def canonical_samples(gathered: list[list[dict]], order: list[int], update: int, workers: int) -> list[dict]:
+def worker_sample_assignments(
+    order: list[int], update: int, rank: int, workers: int, *, single_node_smoke: bool = False
+) -> list[tuple[int, tuple[int, ...]]]:
+    """A smoke worker handles half of each prompt; production workers handle one prompt."""
+    if not single_node_smoke:
+        return [assign_rollouts(order, update, rank, workers)]
+    if workers != 2 or rank not in (0, 1) or update < 0:
+        raise ValueError("Single-node smoke requires exactly two workers")
+    prompts = order[update * 4 : update * 4 + 4]
+    if len(prompts) != 4:
+        raise ValueError("Update exceeds the prompt schedule")
+    return [(prompt, tuple(range(rank * 2, (rank + 1) * 2))) for prompt in prompts]
+
+
+def canonical_samples(
+    gathered: list[list[dict]], order: list[int], update: int, workers: int, *, single_node_smoke: bool = False
+) -> list[dict]:
     """Validate ownership and return all samples in logical prompt/rollout order."""
     if len(gathered) != workers:
         raise ValueError("Missing worker sample records")
     by_id = {}
     prompt_text = {}
     for rank, samples in enumerate(gathered):
-        prompt, rollouts = assign_rollouts(order, update, rank, workers)
-        expected = {(prompt, rollout) for rollout in rollouts}
+        assignments = worker_sample_assignments(order, update, rank, workers, single_node_smoke=single_node_smoke)
+        expected = {(prompt, rollout) for prompt, rollouts in assignments for rollout in rollouts}
         actual = [(s["prompt_index"], s["rollout_index"]) for s in samples]
         if len(actual) != len(expected) or set(actual) != expected:
             raise ValueError(f"Invalid or duplicate sample identities for rank {rank}")
         for sample, key in zip(samples, actual):
+            prompt = key[0]
             if key in by_id:
                 raise ValueError("Duplicate global sample identity")
             text = sample["prompt"]

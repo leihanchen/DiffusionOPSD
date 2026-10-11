@@ -45,3 +45,18 @@ Successful incomplete chained jobs submit one `afterok` successor from saved lau
 Rank 0 records topology, sample counts, adapter consistency, losses, masks, timing, GPU peaks and host RSS in offline W&B and durable JSONL. Each completed update checks exact adapter fingerprints across all workers. Startup records GPU UUIDs and rejects device overlap on the same host before model loading.
 
 A successful probe must reach updates 5 and 6, save `training_state.pt` with `next_update=6`, report 16 rollouts per update and identical adapters, and exit without OOM, SIGSEGV or distributed failure. Compare measured update time and allocated GPU-hours with the earlier probe; more workers alone do not guarantee acceleration. Host offload remains substantial and does not scale down proportionally with the rollout count.
+
+## One-node smoke test
+
+Use an explicit smoke mode when testing two workers on one four-GPU node:
+
+```bash
+python scripts/submit_opsd_video_wan_scaled.py \
+  --nodes 1 --gpus-per-node 4 --single-node-smoke --max-updates 1 \
+  --resume-from logs/wan22-two-gpu-probe-4962523/training_state_step4.pt \
+  --allow-topology-change --expected-resume-update 4 --eval-freq 2
+```
+
+This keeps all four prompts and 16 videos in the global update. Each worker generates rollout indices 0–1 or 2–3 for each of the four prompts: eight sequential rollouts per worker. The global advantage computation and retained-count gradient normalization are unchanged. The source checkpoint remains untouched; the destination checkpoint and W&B configuration identify the single-node smoke topology. Exactly one new update is permitted, and chaining is rejected.
+
+The one-node test still requests 768 GiB host RAM and a four-hour limit. It tests device isolation, concurrent target construction, and one synchronized optimizer update. It is not a timing benchmark of the eight-worker layout. With evaluation every two updates, a step-4-to-step-5 test does not trigger held-out evaluation.

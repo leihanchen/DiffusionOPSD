@@ -56,6 +56,7 @@ srun --label --ntasks="$SLURM_NTASKS" --ntasks-per-node="$WAN_SCALE_WORKERS_PER_
       --evaluate_on_resume="$WAN_EPOCH_EVALUATE_ON_RESUME" \
       --expected_resume_update="$WAN_EPOCH_EXPECTED_RESUME_UPDATE" \
       --allow_topology_change="$WAN_EPOCH_ALLOW_TOPOLOGY_CHANGE" --scalable_two_gpu=true \
+      --single_node_smoke="${WAN_SCALE_SINGLE_NODE_SMOKE:-false}" \
       ${WAN_EPOCH_RESUME_FROM:+--resume_from="$WAN_EPOCH_RESUME_FROM"}' scaled-worker "${BINDS[@]}"
 RESULT="$RUN_DIR/job_${SLURM_JOB_ID}.json"
 [[ -f "$RESULT" ]] || { echo "Missing completed-job result: $RESULT" >&2; exit 1; }

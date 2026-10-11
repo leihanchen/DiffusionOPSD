@@ -36,13 +36,13 @@ from diffusionopsd.video.branch_loss import branch_loss
 from diffusionopsd.video.distributed_epoch import (
     active_cuda_devices,
     adapter_fingerprint,
-    assign_rollouts,
     canonical_samples,
     prepare_resume,
     route_sample_weights,
     topology_rng_seed,
     training_config_hash,
     validate_worker_devices,
+    worker_sample_assignments,
     atomic_checkpoint,
     deterministic_seed,
     prompt_schedule,
@@ -70,6 +70,7 @@ flags.DEFINE_integer("expected_resume_update", -1, "Require this checkpoint upda
 flags.DEFINE_string("resume_from", "", "Explicit trusted local training checkpoint; write to a new run directory")
 flags.DEFINE_bool("allow_topology_change", False, "Permit validated resume with deterministic worker RNG reseeding")
 flags.DEFINE_bool("scalable_two_gpu", False, "Require isolated two-GPU workers with 4/8/16 processes")
+flags.DEFINE_bool("single_node_smoke", False, "Explicit two-worker, one-node, one-update test with the full batch")
 
 
 def _trace(stage, **details):
@@ -295,7 +296,10 @@ def main(_):
     if FLAGS.monitor_eval_freq < 0 or FLAGS.expected_resume_update < -1:
         raise ValueError("Monitoring frequency must be nonnegative; expected resume update must be >= -1")
     rank, world = int(os.environ["SLURM_PROCID"]), int(os.environ["SLURM_NTASKS"])
-    if world not in (4, 8, 16) or cfg.sample.num_batches_per_epoch != 4 or cfg.sample.num_image_per_prompt != 4:
+    allowed_worlds = (2,) if FLAGS.single_node_smoke else (4, 8, 16)
+    if FLAGS.single_node_smoke and (not FLAGS.scalable_two_gpu or FLAGS.max_updates_this_job != 1):
+        raise ValueError("Single-node smoke requires the scaled launcher and exactly one new update")
+    if world not in allowed_worlds or cfg.sample.num_batches_per_epoch != 4 or cfg.sample.num_image_per_prompt != 4:
         raise ValueError("Require 4/8/16 workers and a fixed four-prompt, four-rollout-per-prompt batch")
     if not FLAGS.scalable_two_gpu and world != 4:
         raise ValueError("Additional workers require the scalable two-GPU launcher")
@@ -335,6 +339,10 @@ def main(_):
     if len(set(per_host.values())) != 1:
         raise ValueError("Require equal numbers of workers on each node")
     topology = {"world_size": world, "workers_per_node": next(iter(per_host.values())), "nodes": len(hosts)}
+    if FLAGS.single_node_smoke:
+        if topology["nodes"] != 1 or topology["workers_per_node"] != 2:
+            raise ValueError("Single-node smoke must run two workers on exactly one node")
+        topology["single_node_smoke"] = True
     _trace("worker_placement", **placement, topology=topology)
     _trace(
         "model_placement",
@@ -527,11 +535,17 @@ def main(_):
         update_start = time.monotonic()
         for device in devices:
             torch.cuda.reset_peak_memory_stats(device)
-        index, rollout_indices = assign_rollouts(order, completed, rank, world)
-        prompt = prompts[index]
+        assignments = worker_sample_assignments(
+            order, completed, rank, world, single_node_smoke=FLAGS.single_node_smoke
+        )
         policy.set_adapter("old")
         _trace(f"update_{completed + 1}:sampling:enter")
-        tuples = _sample_local(pipe, roll, reward, judge, cfg, prompt, index, nonce, refs, rollout_indices)
+        tuples = []
+        for index, rollout_indices in assignments:
+            tuples.extend(
+                _sample_local(pipe, roll, reward, judge, cfg, prompts[index], index, nonce, refs, rollout_indices)
+            )
+        local_rollouts = len(tuples)
         _trace(f"update_{completed + 1}:sampling:exit")
         # VideoReward is not used by the differentiable geometry target. Move its
         # frozen weights off the scorer GPU before WAFT recomputes in backward.
@@ -543,7 +557,7 @@ def main(_):
             gathered,
             [{key: t[key] for key in ("prompt", "prompt_index", "rollout_index", "r", "m", "p_q")} for t in tuples],
         )
-        flat = canonical_samples(gathered, order, completed, world)
+        flat = canonical_samples(gathered, order, completed, world, single_node_smoke=FLAGS.single_node_smoke)
         global_rollouts = len(flat)
         sample_seconds = time.monotonic() - update_start
         if rank == 0:
@@ -645,7 +659,8 @@ def main(_):
                 "execution/old_adapter_sha256": adapter_hashes["old"],
                 "execution/workers_per_node": topology["workers_per_node"],
                 "execution/prompts_per_update": 4,
-                "execution/rollouts_per_worker": len(rollout_indices),
+                "execution/rollouts_per_worker": local_rollouts,
+                "execution/single_node_smoke": FLAGS.single_node_smoke,
                 "n_kept": total_kept,
                 "mean_r": counts[2].item() / global_rollouts,
                 "mean_w": counts[3].item() / global_rollouts,
@@ -699,6 +714,8 @@ def main(_):
             "total_updates": cfg.num_epochs,
             "run_dir": str(run_dir),
             "job_id": os.environ["SLURM_JOB_ID"],
+            "single_node_smoke": FLAGS.single_node_smoke,
+            "topology": topology,
         }
         (run_dir / f"job_{os.environ['SLURM_JOB_ID']}.json").write_text(json.dumps(result, indent=2) + "\n")
         wandb.finish()
