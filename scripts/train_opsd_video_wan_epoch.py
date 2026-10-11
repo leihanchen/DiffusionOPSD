@@ -245,7 +245,8 @@ def main(_):
     devices = active_cuda_devices(cfg, torch.cuda.device_count())
     torch.cuda.set_device(0)
     faulthandler.enable()
-    faulthandler.dump_traceback_later(600, repeat=True)
+    # CPython's timer dumps thread frames without the GIL and can itself segfault
+    # mid-dump (python/cpython#116008). Keep fatal-error handling and stage traces.
     _trace("process_group:enter")
     # Rank 0 performs calibration and video evaluation while peers wait.
     # Every node runs one worker. Global rank is not its local
@@ -481,7 +482,6 @@ def main(_):
         print(json.dumps(result), flush=True)
     _barrier("shutdown_barrier")
     dist.destroy_process_group()
-    faulthandler.cancel_dump_traceback_later()
 
 
 def _save_state(path, policy, opt, tracker, evaluator, prompt_hash, config_hash,
