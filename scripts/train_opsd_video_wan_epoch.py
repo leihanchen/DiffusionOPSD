@@ -312,6 +312,22 @@ def main(_):
     faulthandler.enable()
     # CPython's timer dumps thread frames without the GIL and can itself segfault
     # mid-dump (python/cpython#116008). Keep fatal-error handling and stage traces.
+    placement = {
+        "rank": rank,
+        "local_rank": int(os.environ.get("SLURM_LOCALID", "0")),
+        "host": socket.gethostname(),
+        "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "gpu_uuids": [str(getattr(torch.cuda.get_device_properties(d), "uuid", "")) for d in devices],
+    }
+    # Emit local evidence before NCCL: a failed first collective cannot gather it.
+    _trace(
+        "worker_placement:local",
+        **placement,
+        cuda_device_count=torch.cuda.device_count(),
+        torch_version=str(torch.__version__),
+        cuda_version=torch.version.cuda,
+        nccl_version=torch.cuda.nccl.version(),
+    )
     _trace("process_group:enter")
     # Rank 0 performs calibration and video evaluation while peers wait.
     # Slurm isolates each worker's devices; global rank is never a local CUDA index.
@@ -323,13 +339,6 @@ def main(_):
         device_id=torch.device("cuda:0"),
     )
     _trace("process_group:exit")
-    placement = {
-        "rank": rank,
-        "local_rank": int(os.environ.get("SLURM_LOCALID", "0")),
-        "host": socket.gethostname(),
-        "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-        "gpu_uuids": [str(getattr(torch.cuda.get_device_properties(d), "uuid", "")) for d in devices],
-    }
     placements = [None] * world
     dist.all_gather_object(placements, placement)
     if FLAGS.scalable_two_gpu:

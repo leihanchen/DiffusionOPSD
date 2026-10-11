@@ -15,6 +15,8 @@ SIF="$REPO/containers/diffusionopsd.sif"
 [[ "$SLURM_JOB_NUM_NODES" == "$WAN_SCALE_NODES" ]] || { echo "Node count differs from requested layout" >&2; exit 1; }
 mkdir -p "$RUN_DIR"
 export WANDB_MODE=offline WANDB_DIR="$RUN_DIR" PYTHONNOUSERSITE=1
+# Capture transport setup failures before the first application collective.
+export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
 export HF_HOME="$REPO/hf" TORCH_HOME="$REPO/video_reward_ckpts" VIDEO_REWARD_CKPT_PATH="$REPO/video_reward_ckpts"
 export XDG_CACHE_HOME="$REPO/.cache"
