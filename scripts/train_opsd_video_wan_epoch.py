@@ -50,6 +50,7 @@ from diffusionopsd.video.distributed_epoch import (
     should_start_update,
     synchronize_gradients,
 )
+from scripts.wan_paths import portable_path, portable_reference_files, resolve_reference_files
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
 from diffusionopsd.video.gates import effective_weight, identity_keep, percentile_threshold
 from diffusionopsd.video.geo_reward import GeoReward
@@ -394,9 +395,11 @@ def main(_):
             FLAGS.allow_topology_change,
             str(source_path.parent) if FLAGS.resume_from else None,
         )
+        reference_root = source_path.resolve().parents[2] if source_path.parent.parent.name == "logs" else None
+        state["reference_files"] = resolve_reference_files(state["reference_files"], ROOT, source_root=reference_root)
     migrations = state.get("topology_migrations", []) if state else []
     if topology_changed:
-        migrations[-1]["source_checkpoint"] = str(source_path)
+        migrations[-1]["source_checkpoint"] = portable_path(source_path, ROOT)
     _trace("checkpoint_topology", changed=topology_changed, migrations=migrations)
     if FLAGS.expected_resume_update >= 0 and (state is None or state["next_update"] != FLAGS.expected_resume_update):
         raise ValueError(
@@ -759,7 +762,7 @@ def _save_state(
 ):
     state = {
         "version": 2,
-        "training_config": training_config,
+        "training_config": {**training_config, "logdir": portable_path(training_config["logdir"], ROOT)},
         "training_config_hash": training_config_hash(training_config),
         "topology": topology,
         "topology_migrations": migrations,
@@ -768,7 +771,8 @@ def _save_state(
         "config_hash": config_hash,
         "nonce": nonce,
         "order": order,
-        "reference_files": refs,
+        "reference_files": portable_reference_files(refs, ROOT),
+        "reference_path_base": "repository",
         "tau_id": tau_id,
         "tau_motion": tau_motion,
         "policy_default": _cpu_state(get_peft_model_state_dict(policy, adapter_name="default")),

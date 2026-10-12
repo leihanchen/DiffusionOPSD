@@ -213,7 +213,19 @@ def prepare_resume(
             legacy_config["logdir"] = source_run_dir
         legacy_hash = hashlib.sha256(json.dumps(legacy_config, sort_keys=True).encode()).hexdigest()
         if state.get("config_hash") != legacy_hash:
-            raise ValueError("Legacy resume config_hash mismatch")
+            # The original absolute run directory is corroborated by calibration
+            # paths in legacy checkpoints. Verify the full hash again, never skip it.
+            reference_dirs = {
+                str(Path(value).parent.parent)
+                for value in state.get("reference_files", {}).values()
+                if Path(value).is_absolute() and Path(value).parent.name == "calibration"
+            }
+            if len(reference_dirs) != 1:
+                raise ValueError("Legacy resume config_hash mismatch")
+            legacy_config["logdir"] = reference_dirs.pop()
+            legacy_hash = hashlib.sha256(json.dumps(legacy_config, sort_keys=True).encode()).hexdigest()
+            if state.get("config_hash") != legacy_hash:
+                raise ValueError("Legacy resume config_hash mismatch")
         if len(state["rng_states"]) != 4:
             raise ValueError("Legacy checkpoint must contain four worker RNG states")
         previous = {"world_size": 4, "workers_per_node": 1, "nodes": 4}

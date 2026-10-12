@@ -121,28 +121,16 @@ clone_repo() {
 
 patch_local_configs() {
   python3 - "${TARGET}" "${QWEN}" <<'PY'
-import json
 import sys
 from pathlib import Path
 
 target = Path(sys.argv[1])
 qwen = Path(sys.argv[2])
-cfg_path = target / "VideoReward" / "model_config.json"
-if cfg_path.is_file() and qwen.is_dir():
-    cfg = json.loads(cfg_path.read_text())
-    block = cfg.get("model_config")
-    if isinstance(block, dict) and "model_name_or_path" in block:
-        block["model_name_or_path"] = str(qwen)
-        # A local directory has no hub revision. "main" makes from_pretrained
-        # look up the repo id again.
-        block["model_revision"] = None
-    elif "model_name_or_path" in cfg:
-        cfg["model_name_or_path"] = str(qwen)
-        cfg["model_revision"] = None
-    else:
-        raise SystemExit(f"{cfg_path} has no model_name_or_path")
-    cfg_path.write_text(json.dumps(cfg, indent=2) + "\n")
-    print(f"VideoReward base model -> {qwen}")
+sys.path.insert(0, str(target.parent))
+from scripts.wan_paths import normalize_video_reward_config
+
+if normalize_video_reward_config(target.parent):
+    print(f"VideoReward base model -> {qwen.relative_to(target.parent)}")
 
 infer = target / "VideoAlign" / "inference.py"
 if infer.is_file():
@@ -184,6 +172,8 @@ require_weights() {
 }
 
 verify_offline_tree() {
+  # Normalize legacy absolute loader paths locally; no download is needed after a move.
+  python3 "${REPO}/scripts/wan_paths.py"
   MISSING=()
   if [[ ! -s "${SIF}" ]]; then
     MISSING+=("${SIF}")
@@ -214,8 +204,8 @@ verify_offline_tree() {
     MISSING+=("${TARGET}/VideoReward/model_config.json still names Qwen/Qwen2-VL-2B-Instruct")
   fi
   if [[ -f "${TARGET}/VideoReward/model_config.json" && -d "${QWEN}" ]] \
-    && ! grep -q "\"model_name_or_path\": \"${QWEN}\"" "${TARGET}/VideoReward/model_config.json"; then
-    MISSING+=("${TARGET}/VideoReward/model_config.json does not point at ${QWEN}")
+    && ! grep -q '"model_name_or_path": "video_reward_ckpts/Qwen2-VL-2B-Instruct"' "${TARGET}/VideoReward/model_config.json"; then
+    MISSING+=("${TARGET}/VideoReward/model_config.json does not use the repository-relative Qwen path")
   fi
   if [[ -f "${TARGET}/VideoAlign/inference.py" ]] \
     && ! grep -q 'disable_flash_attn2=True' "${TARGET}/VideoAlign/inference.py"; then

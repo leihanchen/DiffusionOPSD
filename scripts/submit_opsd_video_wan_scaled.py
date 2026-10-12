@@ -8,9 +8,13 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from scripts.wan_paths import portable_path, resolve_repo_path  # noqa: E402 (resolve imports from the moved repository)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -18,7 +22,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--nodes", type=int, default=4)
     result.add_argument("--gpus-per-node", type=int, default=4)
     result.add_argument("--cpus-per-worker", type=int, default=12)
-    result.add_argument("--mem", default="", help="Per-node Slurm memory; default 448G/768G for one/two workers")
+    result.add_argument(
+        "--mem", default="", help="Per-node Slurm memory; default smoke 480G; production 448G/768G for one/two workers"
+    )
     result.add_argument("--time", default="04:00:00", help="HH:MM:SS allocation limit")
     result.add_argument("--job-budget-hours", type=float, default=None)
     result.add_argument("--account", default="def-wangcs")
@@ -43,7 +49,12 @@ def parser() -> argparse.ArgumentParser:
 
 def submission_options(args: argparse.Namespace) -> dict:
     if args.resubmit:
-        options = json.loads(Path(args.resubmit).read_text())
+        options = json.loads(resolve_repo_path(args.resubmit, ROOT).read_text())
+        old_config = Path(options["config"])
+        if old_config.is_absolute() and old_config.parent.name == "config":
+            copied_config = ROOT / "config" / old_config.name
+            if copied_config.is_file():
+                options["config"] = str(copied_config.relative_to(ROOT))
         options.update(
             resume_from="",
             expected_resume_update=-1,
@@ -87,19 +98,19 @@ def build_submission(options: dict) -> dict:
     if not run_id or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in run_id):
         raise ValueError("Run ID may contain only letters, numbers, hyphens and underscores")
     run_dir = ROOT / "logs" / f"wan22-scaled-{run_id}"
-    resume = str(Path(options["resume_from"]).expanduser().resolve()) if options["resume_from"] else ""
-    config = str(Path(options["config"]).expanduser().resolve())
-    memory = options["mem"] or ("448G" if per_node == 1 else "768G")
+    resume = portable_path(options["resume_from"], ROOT) if options["resume_from"] else ""
+    config = portable_path(options["config"], ROOT)
+    memory = options["mem"] or ("480G" if smoke else ("448G" if per_node == 1 else "768G"))
     environment = {
         "WAN_SCALE_NODES": str(nodes),
         "WAN_SCALE_GPUS_PER_NODE": str(gpus),
         "WAN_SCALE_WORKERS_PER_NODE": str(per_node),
         "WAN_SCALE_WORLD_SIZE": str(world),
         "WAN_SCALE_SINGLE_NODE_SMOKE": str(smoke).lower(),
-        "WAN_SCALE_OPTIONS": str(run_dir / "launch_options.json"),
+        "WAN_SCALE_OPTIONS": str((run_dir / "launch_options.json").relative_to(ROOT)),
         "WAN_EPOCH_RUN_ID": run_id,
         "WAN_EPOCH_CONFIG": config,
-        "WAN_EPOCH_RUN_DIR": str(run_dir),
+        "WAN_EPOCH_RUN_DIR": str(run_dir.relative_to(ROOT)),
         "WAN_EPOCH_CHAIN_JOBS": str(int(options["chain"])),
         "WAN_EPOCH_JOB_BUDGET_HOURS": str(budget),
         "WAN_EPOCH_MAX_UPDATES": str(options["max_updates"]),
@@ -137,7 +148,7 @@ def build_submission(options: dict) -> dict:
         "global_rollouts": 16,
         "run_dir": str(run_dir),
         "environment": environment,
-        "options": {**options, "run_id": run_id, "config": config},
+        "options": {**options, "run_id": run_id, "config": config, "resume_from": resume},
     }
 
 
@@ -149,10 +160,10 @@ def main() -> None:
             print(json.dumps(payload, indent=2))
             return
         options = payload["options"]
-        if not Path(options["config"]).is_file():
+        if not resolve_repo_path(options["config"], ROOT).is_file():
             raise ValueError("Missing configuration file")
         if options["resume_from"]:
-            source = Path(options["resume_from"]).expanduser().resolve()
+            source = resolve_repo_path(options["resume_from"], ROOT)
             if not source.is_file():
                 raise ValueError("Missing trusted resume checkpoint")
             if source.parent == Path(payload["run_dir"]) or (Path(payload["run_dir"]) / "training_state.pt").exists():

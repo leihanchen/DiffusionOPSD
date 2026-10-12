@@ -171,6 +171,7 @@ def test_single_node_smoke_allocation_is_explicit_and_one_update():
     )
     payload = json.loads(result.stdout)
     assert payload["world_size"] == 2
+    assert "--mem=480G" in payload["command"]
     assert payload["global_rollouts"] == 16
     assert "--nodes=1" in payload["command"]
     assert "--ntasks=2" in payload["command"]
