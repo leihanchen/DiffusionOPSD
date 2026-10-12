@@ -138,6 +138,8 @@ def test_container_launch_preserves_bound_devices_and_checkpoint_argument(tmp_pa
     )
     args = json.loads(result.stdout)
     assert "CUDA_VISIBLE_DEVICES=2,3" in args
+    assert "NCCL_P2P_DISABLE=1" in args
+    assert "NCCL_CUMEM_HOST_ENABLE=0" in args
     assert "--resume_from=/tmp/checkpoint with spaces.pt" in args
     assert "--scalable_two_gpu=true" in args
     assert "--allow_topology_change=true" in args

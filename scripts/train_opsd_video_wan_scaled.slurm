@@ -17,6 +17,10 @@ mkdir -p "$RUN_DIR"
 export WANDB_MODE=offline WANDB_DIR="$RUN_DIR" PYTHONNOUSERSITE=1
 # Capture transport setup failures before the first application collective.
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
+# Slurm-isolated peers cannot import CUDA device/host handles in this container.
+# Verified on Narval: POSIX host shared memory supports gathers and gradient sums.
+export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
+export NCCL_CUMEM_HOST_ENABLE="${NCCL_CUMEM_HOST_ENABLE:-0}"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
 export HF_HOME="$REPO/hf" TORCH_HOME="$REPO/video_reward_ckpts" VIDEO_REWARD_CKPT_PATH="$REPO/video_reward_ckpts"
 export XDG_CACHE_HOME="$REPO/.cache"
@@ -44,6 +48,8 @@ srun --label --ntasks="$SLURM_NTASKS" --ntasks-per-node="$WAN_SCALE_WORKERS_PER_
   --gpus-per-task=a100:2 --gpu-bind=per_task:2 --kill-on-bad-exit=1 \
   bash -c 'exec apptainer exec --nv "$@" --pwd "$WAN_SCALE_REPO" \
     --env "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" \
+    --env "NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}" \
+    --env "NCCL_CUMEM_HOST_ENABLE=${NCCL_CUMEM_HOST_ENABLE:-0}" \
     --env PYTHONNOUSERSITE=1 --env WANDB_MODE=offline --env "WANDB_DIR=$WANDB_DIR" \
     --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 --env HF_DATASETS_OFFLINE=1 \
     --env "HF_HOME=$HF_HOME" --env "TORCH_HOME=$TORCH_HOME" \
