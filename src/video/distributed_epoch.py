@@ -11,6 +11,12 @@ import torch
 import torch.distributed as dist
 
 
+def configure_isolated_worker_nccl() -> dict[str, str]:
+    """Use the verified Narval transport defaults, including for queued launchers."""
+    defaults = {"NCCL_P2P_DISABLE": "1", "NCCL_CUMEM_HOST_ENABLE": "0"}
+    return {key: os.environ.setdefault(key, value) for key, value in defaults.items()}
+
+
 def active_cuda_devices(cfg, available_count: int) -> tuple[int, ...]:
     """Validate configured model placement and return each used GPU once."""
     devices = {0}  # Policy and NCCL always use local GPU 0.

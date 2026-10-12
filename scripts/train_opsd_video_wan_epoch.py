@@ -37,6 +37,7 @@ from diffusionopsd.video.distributed_epoch import (
     active_cuda_devices,
     adapter_fingerprint,
     canonical_samples,
+    configure_isolated_worker_nccl,
     prepare_resume,
     route_sample_weights,
     topology_rng_seed,
@@ -308,6 +309,9 @@ def main(_):
     devices = active_cuda_devices(cfg, torch.cuda.device_count())
     if FLAGS.scalable_two_gpu and (torch.cuda.device_count() != 2 or devices != (0, 1)):
         raise ValueError("Scalable workers must see exactly two CUDA devices and use cuda:0/cuda:1")
+    if FLAGS.scalable_two_gpu:
+        # Slurm snapshots batch scripts at submission; queued jobs use this live entry point.
+        _trace("nccl_environment", **configure_isolated_worker_nccl())
     torch.cuda.set_device(0)
     faulthandler.enable()
     # CPython's timer dumps thread frames without the GIL and can itself segfault

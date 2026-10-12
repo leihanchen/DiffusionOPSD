@@ -13,6 +13,26 @@ from diffusionopsd.video.distributed_epoch import (
 )
 
 
+def test_isolated_nccl_defaults_reach_process_environment(monkeypatch):
+    import os
+
+    from diffusionopsd.video.distributed_epoch import configure_isolated_worker_nccl
+
+    monkeypatch.delenv("NCCL_P2P_DISABLE", raising=False)
+    monkeypatch.delenv("NCCL_CUMEM_HOST_ENABLE", raising=False)
+    settings = configure_isolated_worker_nccl()
+    assert settings == {"NCCL_P2P_DISABLE": "1", "NCCL_CUMEM_HOST_ENABLE": "0"}
+    assert all(os.environ[key] == value for key, value in settings.items())
+
+
+def test_isolated_nccl_defaults_preserve_explicit_overrides(monkeypatch):
+    from diffusionopsd.video.distributed_epoch import configure_isolated_worker_nccl
+
+    monkeypatch.setenv("NCCL_P2P_DISABLE", "0")
+    monkeypatch.setenv("NCCL_CUMEM_HOST_ENABLE", "1")
+    assert configure_isolated_worker_nccl() == {"NCCL_P2P_DISABLE": "0", "NCCL_CUMEM_HOST_ENABLE": "1"}
+
+
 @pytest.mark.parametrize("workers", [4, 8, 16])
 def test_sample_assignment_preserves_epoch_and_global_batch(workers):
     order = list(reversed(range(200)))
