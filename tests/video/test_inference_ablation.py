@@ -76,7 +76,7 @@ def test_six_videos_paired_noise_fresh_scheduler_and_offline_wandb(tmp_path, mon
             pipe, Reward(), Judge(), cfg, experiment, "chessboard", tmp_path, lambda: SimpleNamespace(used=False), run
         )
         assert run.settings.mode == "offline"
-        assert run.summary["ablation/differences/steps30/VQ"] == 0.0
+        assert run.summary["ablation/num_videos"] == 6
     finally:
         run.finish()
     assert summary["num_videos"] == 6
@@ -87,6 +87,10 @@ def test_six_videos_paired_noise_fresh_scheduler_and_offline_wandb(tmp_path, mon
         assert rows[i]["initial_latent_hash"] != rows[i + 2]["initial_latent_hash"]
         assert torch.equal(pipe.calls[i]["latents"], pipe.calls[i + 1]["latents"])
     assert [x["num_inference_steps"] for x in pipe.calls] == [50, 30, 50] * 2
+    tables = list(tmp_path.glob("wandb/offline-run-*/files/media/table/**/*.table.json"))
+    assert len(tables) == 3
+    means = next(json.loads(p.read_text()) for p in tables if "means" in p.name)
+    assert len(means["data"]) == 3 and "motion" in means["columns"]
     assert len(list(tmp_path.glob("*.mp4"))) == 6
     assert len(list(tmp_path.glob("*.png"))) == 18
     assert len(list(tmp_path.glob("*_initial.pt"))) == 4

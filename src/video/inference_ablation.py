@@ -262,10 +262,20 @@ def run_ablation(pipe, reward, judge, cfg, experiment, prompt, output, scheduler
                         "sample_index": len(rows),
                         "condition": condition,
                         "seed": seed,
-                        **{f"ablation/{condition}/{k}": v for k, v in scores.items()},
-                        **{
-                            f"ablation/{condition}/{k}": v for k, v in row.items() if k.endswith(("_seconds", "_bytes"))
-                        },
+                        "sampler": sampler,
+                        "num_frames": frames,
+                        "num_steps": steps,
+                        "height": height,
+                        "width": width,
+                        "runtime/seconds_per_video": row["duration_seconds"],
+                        "memory/peak_allocated_gib": max(
+                            (v for k, v in row.items() if k.endswith("peak_allocated_bytes")), default=0
+                        )
+                        / 2**30,
+                        "memory/peak_reserved_gib": max(
+                            (v for k, v in row.items() if k.endswith("peak_reserved_bytes")), default=0
+                        )
+                        / 2**30,
                         f"ablation/videos/{condition}": wandb.Video(str(output / video), format="mp4", caption=caption),
                     },
                     step=len(rows),
@@ -275,10 +285,30 @@ def run_ablation(pipe, reward, judge, cfg, experiment, prompt, output, scheduler
                 del latents, clip, geometry, quality
         current = {"phase": "summary"}
         summary = summarize(rows, experiment["seeds"], tuple(experiment["conditions"]))
+        score_columns = list(SCORES)
+        sample_columns = [
+            "condition",
+            "seed",
+            "num_frames",
+            "num_steps",
+            "width",
+            "height",
+            *score_columns,
+            "compute_seconds",
+            "duration_seconds",
+            "playback_duration_seconds",
+        ]
+        samples = wandb.Table(columns=sample_columns, data=[[row[column] for column in sample_columns] for row in rows])
+        metric_columns = list(next(iter(summary["means"].values())))
+        tables = {"ablation/samples": samples}
         for category in ("means", "differences"):
-            for name, metrics in summary[category].items():
-                for metric, value in metrics.items():
-                    wandb_run.summary[f"ablation/{category}/{name}/{metric}"] = value
+            tables[f"ablation/{category}"] = wandb.Table(
+                columns=["condition_or_comparison", *metric_columns],
+                data=[[name, *[metrics[k] for k in metric_columns]] for name, metrics in summary[category].items()],
+            )
+        wandb_run.log(tables, step=len(rows) + 1, commit=True)
+        wandb_run.summary["ablation/num_videos"] = len(rows)
+        wandb_run.summary["ablation/num_comparisons"] = len(summary["differences"])
         write_json(output / "summary.json", summary)
         return summary
     except Exception as exc:
