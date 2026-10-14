@@ -188,6 +188,7 @@ def _score_images_eval(scorer, reward: str, images: torch.Tensor, prompts):
     with torch.no_grad():
         if reward == "pickscore":
             from PIL import Image
+
             arrays = (images * 255).round().clamp(0, 255).to(torch.uint8).cpu().numpy()
             pil_images = [Image.fromarray(array.transpose(1, 2, 0)) for array in arrays]
             return scorer(prompts, pil_images).float()
@@ -235,15 +236,22 @@ def _evaluate(
         generator = torch.Generator(device=device).manual_seed(int(records[0]["noise_seed"]))
         with torch.autocast("cuda", dtype=dtype):
             images, _latents = _rollout(
-                pipeline, embeds, pooled, config, generators=generator,
-                num_steps=num_steps, solver=solver,
+                pipeline,
+                embeds,
+                pooled,
+                config,
+                generators=generator,
+                num_steps=num_steps,
+                solver=solver,
             )
         images = images.detach().float()
         score_batch = 1 if reward in EVAL_SCORE_BATCH_ONE_REWARDS else len(records)
         for start in range(0, len(records), score_batch):
             chunk = records[start : start + score_batch]
             score = _score_images_eval(
-                scorer, reward, images[start : start + len(chunk)],
+                scorer,
+                reward,
+                images[start : start + len(chunk)],
                 [record["prompt"] for record in chunk],
             )
             local_indices.extend(int(record["index"]) for record in chunk)
@@ -260,15 +268,17 @@ def _evaluate(
         per_image = []
         for index, score in merged:
             source = by_index[index]
-            per_image.append({
-                "index": index,
-                "prompt": source["prompt"],
-                "seed": int(source["noise_seed"]),
-                "noise_offset": int(source["noise_offset"]),
-                "noise_batch_size": int(source["noise_batch_size"]),
-                "canonical_generation_batch_size": int(source["canonical_generation_batch_size"]),
-                "score": score,
-            })
+            per_image.append(
+                {
+                    "index": index,
+                    "prompt": source["prompt"],
+                    "seed": int(source["noise_seed"]),
+                    "noise_offset": int(source["noise_offset"]),
+                    "noise_batch_size": int(source["noise_batch_size"]),
+                    "canonical_generation_batch_size": int(source["canonical_generation_batch_size"]),
+                    "score": score,
+                }
+            )
         payload = {
             "backbone": "sd35m",
             "reward": reward,
@@ -280,8 +290,9 @@ def _evaluate(
                 "resolution": int(config.resolution),
                 "base_seed": int(manifest_records[0]["base_seed"]),
                 "generation_batch_size": int(manifest_records[0]["canonical_generation_batch_size"]),
-                "score_batch_size": 1 if reward in EVAL_SCORE_BATCH_ONE_REWARDS
-                                    else int(manifest_records[0]["canonical_generation_batch_size"]),
+                "score_batch_size": 1
+                if reward in EVAL_SCORE_BATCH_ONE_REWARDS
+                else int(manifest_records[0]["canonical_generation_batch_size"]),
                 "reward_path": "canonical_flow_grpo_forward",
                 "seed_scheme": str(manifest_records[0]["seed_scheme"]),
                 "score_scale": "paper_raw" if score_scale != 1.0 else "native",
@@ -293,9 +304,7 @@ def _evaluate(
     return payload
 
 
-def _calibrate(
-    *, pipeline, model, scorer, reward, encoded_records, config, rr, device, dtype, group, rank
-):
+def _calibrate(*, pipeline, model, scorer, reward, encoded_records, config, rr, device, dtype, group, rank):
     if not bool(rr.standardize_reward):
         payload = {
             "mode": "released_imagereward_raw_scale",
@@ -319,16 +328,20 @@ def _calibrate(
         late_index = choose_late_index(num_steps, float(rr.late_fraction), int(record["late_seed"]))
         with torch.autocast("cuda", dtype=dtype):
             _images, latents = _rollout(
-                pipeline, embeds, pooled, config, generators=generator,
-                num_steps=int(config.sample.num_steps), solver=str(config.sample.solver),
-                stop_before_index=late_index, decode=False,
+                pipeline,
+                embeds,
+                pooled,
+                config,
+                generators=generator,
+                num_steps=int(config.sample.num_steps),
+                solver=str(config.sample.solver),
+                stop_before_index=late_index,
+                decode=False,
             )
         if _images is not None or len(latents) != late_index + 1:
             raise AssertionError("calibration must stop exactly before the sampled denoiser call")
         with torch.no_grad():
-            x0, _sigma = _late_x0(
-                model, latents, pipeline.scheduler.sigmas, embeds, pooled, [late_index], dtype
-            )
+            x0, _sigma = _late_x0(model, latents, pipeline.scheduler.sigmas, embeds, pooled, [late_index], dtype)
         score = _forward_reward(pipeline, scorer, reward, x0, [record["prompt"]])
         local_indices.append(int(record["index"]))
         local_scores.append(score.detach().float())
@@ -391,15 +404,12 @@ def main(_):
     expected_policy = int(rr.expected_policy_world_size)
     if launch_world != expected_launch or policy_world != expected_policy:
         raise RuntimeError(
-            f"topology mismatch: launch={launch_world}/{expected_launch}, "
-            f"policy={policy_world}/{expected_policy}"
+            f"topology mismatch: launch={launch_world}/{expected_launch}, policy={policy_world}/{expected_policy}"
         )
     micro_batch = int(rr.micro_batch_size)
     if micro_batch != 1:
         raise RuntimeError("truncated-prefix ReFL currently requires micro_batch_size=1")
-    accum = derive_gradient_accumulation_steps(
-        int(rr.trajectories_per_update), policy_world, micro_batch
-    )
+    accum = derive_gradient_accumulation_steps(int(rr.trajectories_per_update), policy_world, micro_batch)
     if accum != int(rr.gradient_accumulation_steps):
         raise RuntimeError(f"resolved accumulation {accum} != config {rr.gradient_accumulation_steps}")
     if profiling.profile_enabled():
@@ -435,8 +445,14 @@ def main(_):
     pipeline.vae.enable_gradient_checkpointing()
 
     targets = [
-        "attn.add_k_proj", "attn.add_q_proj", "attn.add_v_proj", "attn.to_add_out",
-        "attn.to_k", "attn.to_out.0", "attn.to_q", "attn.to_v",
+        "attn.add_k_proj",
+        "attn.add_q_proj",
+        "attn.add_v_proj",
+        "attn.to_add_out",
+        "attn.to_k",
+        "attn.to_out.0",
+        "attn.to_q",
+        "attn.to_v",
     ]
     lora = LoraConfig(r=32, lora_alpha=64, init_lora_weights="gaussian", target_modules=targets)
     if config.train.lora_path:
@@ -445,14 +461,20 @@ def main(_):
         transformer = get_peft_model(transformer, lora)
     transformer.set_adapter("default")
     model = DDP(
-        transformer, device_ids=[local_rank], output_device=local_rank,
-        find_unused_parameters=False, process_group=group,
+        transformer,
+        device_ids=[local_rank],
+        output_device=local_rank,
+        find_unused_parameters=False,
+        process_group=group,
     )
     pipeline.transformer = model.module
     trainable = [parameter for parameter in model.module.parameters() if parameter.requires_grad]
     optimizer = torch.optim.AdamW(
-        trainable, lr=float(rr.learning_rate), betas=(config.train.adam_beta1, config.train.adam_beta2),
-        weight_decay=float(rr.weight_decay), eps=config.train.adam_epsilon,
+        trainable,
+        lr=float(rr.learning_rate),
+        betas=(config.train.adam_beta1, config.train.adam_beta2),
+        weight_decay=float(rr.weight_decay),
+        eps=config.train.adam_epsilon,
     )
     ema = runtime.EMAModuleWrapper(trainable, decay=0.9, update_step_interval=1, device=device)
 
@@ -488,16 +510,23 @@ def main(_):
     curve_records = final_records[: int(rr.curve_eval_num_prompts)]
     write_json(
         os.path.join(config.save_dir, "manifests", "calibration.json"),
-        {"source": str(rr.calibration_manifest_path), "records": calibration_records,
-         "used": bool(rr.standardize_reward), "object": "random-late one-step x0"}, rank=rank,
+        {
+            "source": str(rr.calibration_manifest_path),
+            "records": calibration_records,
+            "used": bool(rr.standardize_reward),
+            "object": "random-late one-step x0",
+        },
+        rank=rank,
     )
     write_json(
         os.path.join(config.save_dir, "manifests", "curve_eval.json"),
-        {"source": str(rr.curve_manifest_path), "records": curve_records}, rank=rank,
+        {"source": str(rr.curve_manifest_path), "records": curve_records},
+        rank=rank,
     )
     write_json(
         os.path.join(config.save_dir, "manifests", "final_eval.json"),
-        {"source": str(rr.final_manifest_path), "records": final_records}, rank=rank,
+        {"source": str(rr.final_manifest_path), "records": final_records},
+        rank=rank,
     )
     encoded_calibration = _preencode_records(
         pipeline,
@@ -507,12 +536,8 @@ def main(_):
         device,
         dtype,
     )
-    encoded_final = _preencode_eval_batches(
-        pipeline, final_records, rank, policy_world, device, dtype
-    )
-    encoded_curve = _preencode_eval_batches(
-        pipeline, curve_records, rank, policy_world, device, dtype
-    )
+    encoded_final = _preencode_eval_batches(pipeline, final_records, rank, policy_world, device, dtype)
+    encoded_curve = _preencode_eval_batches(pipeline, curve_records, rank, policy_world, device, dtype)
     _park_t5(pipeline)
 
     scorer = runtime._load_reward_scorer(reward, device)
@@ -535,9 +560,17 @@ def main(_):
             require_finite_nonzero("resume calibration raw_std", calibration_std, minimum=1e-6)
     else:
         calibration_mean, calibration_std = _calibrate(
-            pipeline=pipeline, model=model.module, scorer=scorer, reward=reward,
-            encoded_records=encoded_calibration, config=config, rr=rr, device=device, dtype=dtype,
-            group=group, rank=rank,
+            pipeline=pipeline,
+            model=model.module,
+            scorer=scorer,
+            reward=reward,
+            encoded_records=encoded_calibration,
+            config=config,
+            rr=rr,
+            device=device,
+            dtype=dtype,
+            group=group,
+            rank=rank,
         )
     calibration_seconds = time.perf_counter() - calibration_started
 
@@ -548,12 +581,22 @@ def main(_):
         ema.copy_ema_to(trainable, store_temp=True)
         try:
             eval0 = _evaluate(
-                pipeline=pipeline, model=model.module, scorer=scorer, reward=reward,
-                encoded_batches=encoded_curve, manifest_records=curve_records,
-                config=config, device=device, dtype=dtype, group=group, rank=rank,
-                num_steps=40, solver="flow",
+                pipeline=pipeline,
+                model=model.module,
+                scorer=scorer,
+                reward=reward,
+                encoded_batches=encoded_curve,
+                manifest_records=curve_records,
+                config=config,
+                device=device,
+                dtype=dtype,
+                group=group,
+                rank=rank,
+                num_steps=40,
+                solver="flow",
                 output_path=os.path.join(config.save_dir, "curve", "update_0000.json"),
-                update=0, score_scale=score_scale,
+                update=0,
+                score_scale=score_scale,
             )
         finally:
             ema.copy_temp_to(trainable)
@@ -566,8 +609,9 @@ def main(_):
         "backbone": "SD3.5-M",
         "method": "rollout-budget-matched ReFL",
         "reward": reward,
-        "loss": "1e-3 * relu(2 - raw_ImageReward)" if reward == "imagereward"
-                else "1e-3 * relu(2 - frozen_base_zscore_reward)",
+        "loss": "1e-3 * relu(2 - raw_ImageReward)"
+        if reward == "imagereward"
+        else "1e-3 * relu(2 - frozen_base_zscore_reward)",
         "algorithm": {
             "implementation_revision": REFL_IMPLEMENTATION_REVISION,
             "current_policy_fresh_noise_rollout": True,
@@ -602,8 +646,11 @@ def main(_):
             "plus final, committed before same-step online eval"
         ),
         "artifact_storage": "config.save_dir",
-        "calibration": {"mean": calibration_mean, "std": calibration_std,
-                        "one_step_late_state": bool(rr.standardize_reward)},
+        "calibration": {
+            "mean": calibration_mean,
+            "std": calibration_std,
+            "one_step_late_state": bool(rr.standardize_reward),
+        },
         "config": config.to_dict(),
         "provenance": provenance,
         "phase_timing_seconds": {
@@ -612,9 +659,12 @@ def main(_):
             "update0_eval": update0_eval_seconds,
         },
         "environment": {
-            "hostname": socket.gethostname(), "platform": platform.platform(),
-            "python": platform.python_version(), "torch": torch.__version__,
-            "cuda": torch.version.cuda, "gpu": torch.cuda.get_device_name(device),
+            "hostname": socket.gethostname(),
+            "platform": platform.platform(),
+            "python": platform.python_version(),
+            "torch": torch.__version__,
+            "cuda": torch.version.cuda,
+            "gpu": torch.cuda.get_device_name(device),
         },
         "started": _now(),
         "resume_history": [],
@@ -624,12 +674,14 @@ def main(_):
         if existing_run.get("algorithm", {}).get("implementation_revision") != REFL_IMPLEMENTATION_REVISION:
             raise RuntimeError("resume run_config implementation revision mismatch")
         run_config["started"] = existing_run.get("started", run_config["started"])
-        run_config["resume_history"] = list(existing_run.get("resume_history", [])) + [{
-            "checkpoint": resume_checkpoint,
-            "global_step": global_step,
-            "hostname": socket.gethostname(),
-            "resumed": _now(),
-        }]
+        run_config["resume_history"] = list(existing_run.get("resume_history", [])) + [
+            {
+                "checkpoint": resume_checkpoint,
+                "global_step": global_step,
+                "hostname": socket.gethostname(),
+                "resumed": _now(),
+            }
+        ]
     write_json(os.path.join(config.save_dir, "run_config.json"), run_config, rank=rank)
     if rank == 0 and eval0 is not None:
         runtime.wandb.log(
@@ -641,9 +693,7 @@ def main(_):
     if resume_checkpoint:
         restore_refl_rng_state(resume_checkpoint, device=device, group=group)
         replay_eval_step = (
-            global_step
-            if global_step % int(rr.eval_every) == 0 or global_step == int(rr.num_updates)
-            else None
+            global_step if global_step % int(rr.eval_every) == 0 or global_step == int(rr.num_updates) else None
         )
         retained = prepare_resume_artifacts(
             config.save_dir,
@@ -665,14 +715,22 @@ def main(_):
         ema.copy_ema_to(trainable, store_temp=True)
         try:
             result = _evaluate(
-                pipeline=pipeline, model=model.module, scorer=scorer, reward=reward,
-                encoded_batches=encoded_curve, manifest_records=curve_records,
-                config=config, device=device, dtype=dtype,
-                group=group, rank=rank, num_steps=40, solver="flow",
-                output_path=os.path.join(
-                    config.save_dir, "curve", f"update_{global_step:04d}.json"
-                ),
-                update=global_step, score_scale=score_scale,
+                pipeline=pipeline,
+                model=model.module,
+                scorer=scorer,
+                reward=reward,
+                encoded_batches=encoded_curve,
+                manifest_records=curve_records,
+                config=config,
+                device=device,
+                dtype=dtype,
+                group=group,
+                rank=rank,
+                num_steps=40,
+                solver="flow",
+                output_path=os.path.join(config.save_dir, "curve", f"update_{global_step:04d}.json"),
+                update=global_step,
+                score_scale=score_scale,
             )
         finally:
             ema.copy_temp_to(trainable)
@@ -712,9 +770,13 @@ def main(_):
         if rank == 0:
             groups = {}
             for record in update_records:
-                groups.setdefault(int(record["group_slot"]), {
-                    "dataset_index": int(record["dataset_index"]), "prompt": record["prompt"],
-                })
+                groups.setdefault(
+                    int(record["group_slot"]),
+                    {
+                        "dataset_index": int(record["dataset_index"]),
+                        "prompt": record["prompt"],
+                    },
+                )
             append_jsonl(
                 os.path.join(config.save_dir, "manifests", "train_updates.jsonl"),
                 {
@@ -738,24 +800,27 @@ def main(_):
             prompts = [record["prompt"] for record in records]
             embeds = torch.cat([embed_cache[int(record["dataset_index"])][0] for record in records])
             pooled = torch.cat([embed_cache[int(record["dataset_index"])][1] for record in records])
-            generators = [
-                torch.Generator(device=device).manual_seed(int(record["noise_seed"])) for record in records
-            ]
+            generators = [torch.Generator(device=device).manual_seed(int(record["noise_seed"])) for record in records]
             if len(generators) == 1:
                 generators = generators[0]
             if len(records) != 1:
                 raise AssertionError("truncated-prefix rollout requires one trajectory per micro-batch")
             num_steps = int(config.sample.num_steps)
             late_indices = [
-                choose_late_index(num_steps, float(rr.late_fraction), int(record["late_seed"]))
-                for record in records
+                choose_late_index(num_steps, float(rr.late_fraction), int(record["late_seed"])) for record in records
             ]
             model.module.eval()
             with torch.autocast("cuda", dtype=dtype):
                 _images, latents = _rollout(
-                    pipeline, embeds, pooled, config, generators=generators,
-                    num_steps=int(config.sample.num_steps), solver=str(config.sample.solver),
-                    stop_before_index=late_indices[0], decode=False,
+                    pipeline,
+                    embeds,
+                    pooled,
+                    config,
+                    generators=generators,
+                    num_steps=int(config.sample.num_steps),
+                    solver=str(config.sample.solver),
+                    stop_before_index=late_indices[0],
+                    decode=False,
                 )
             if _images is not None or len(latents) != late_indices[0] + 1:
                 raise AssertionError("training rollout executed beyond the sampled late state")
@@ -763,12 +828,9 @@ def main(_):
             should_sync = micro_index == len(local_batches) - 1
             with maybe_no_sync(model, should_sync):
                 x0, sigma = _late_x0(model, latents, pipeline.scheduler.sigmas, embeds, pooled, late_indices, dtype)
-                raw_reward = runtime._reward_of_latents_grad(
-                    pipeline, scorer, reward, x0, prompts
-                ).float()
+                raw_reward = runtime._reward_of_latents_grad(pipeline, scorer, reward, x0, prompts).float()
                 normalized = (
-                    (raw_reward - calibration_mean) / calibration_std
-                    if bool(rr.standardize_reward) else raw_reward
+                    (raw_reward - calibration_mean) / calibration_std if bool(rr.standardize_reward) else raw_reward
                 )
                 hinge = torch.relu(float(rr.hinge_margin) - normalized)
                 loss = float(rr.grad_scale) * hinge.mean()
@@ -780,9 +842,9 @@ def main(_):
                 else:
                     scaled_loss.backward()
             raw_values.append(raw_reward.detach())
-            prompt_group_values.append(torch.tensor(
-                [record["group_slot"] for record in records], device=device, dtype=torch.long
-            ))
+            prompt_group_values.append(
+                torch.tensor([record["group_slot"] for record in records], device=device, dtype=torch.long)
+            )
             normalized_values.append(normalized.detach())
             active_values.append((hinge.detach() > 0).float())
             sigma_values.append(sigma.detach())
@@ -837,12 +899,8 @@ def main(_):
             "grad_norm": float(grad_sync),
             "step_seconds": float(step_seconds_tensor),
             "cumulative_train_seconds": cumulative_train_seconds,
-            "training_compute_gpu_hours": (
-                cumulative_train_seconds * int(rr.actual_compute_gpu_count) / 3600.0
-            ),
-            "training_reserved_gpu_hours": (
-                cumulative_train_seconds * int(rr.reserved_gpu_count) / 3600.0
-            ),
+            "training_compute_gpu_hours": (cumulative_train_seconds * int(rr.actual_compute_gpu_count) / 3600.0),
+            "training_reserved_gpu_hours": (cumulative_train_seconds * int(rr.reserved_gpu_count) / 3600.0),
             "actual_compute_gpu_count": int(rr.actual_compute_gpu_count),
             "reserved_gpu_count": int(rr.reserved_gpu_count),
             "denoiser_forwards_mean": late_stats["mean"] + 1.0,
@@ -883,12 +941,22 @@ def main(_):
             ema.copy_ema_to(trainable, store_temp=True)
             try:
                 result = _evaluate(
-                    pipeline=pipeline, model=model.module, scorer=scorer, reward=reward,
-                    encoded_batches=encoded_curve, manifest_records=curve_records,
-                    config=config, device=device, dtype=dtype,
-                    group=group, rank=rank, num_steps=40, solver="flow",
+                    pipeline=pipeline,
+                    model=model.module,
+                    scorer=scorer,
+                    reward=reward,
+                    encoded_batches=encoded_curve,
+                    manifest_records=curve_records,
+                    config=config,
+                    device=device,
+                    dtype=dtype,
+                    group=group,
+                    rank=rank,
+                    num_steps=40,
+                    solver="flow",
                     output_path=os.path.join(config.save_dir, "curve", f"update_{global_step:04d}.json"),
-                    update=global_step, score_scale=score_scale,
+                    update=global_step,
+                    score_scale=score_scale,
                 )
             finally:
                 ema.copy_temp_to(trainable)
@@ -922,19 +990,30 @@ def main(_):
     ema.copy_ema_to(trainable, store_temp=True)
     try:
         final_result = _evaluate(
-            pipeline=pipeline, model=model.module, scorer=scorer, reward=reward,
-            encoded_batches=encoded_final, manifest_records=final_records,
-            config=config, device=device, dtype=dtype,
-            group=group, rank=rank, num_steps=40, solver="flow",
+            pipeline=pipeline,
+            model=model.module,
+            scorer=scorer,
+            reward=reward,
+            encoded_batches=encoded_final,
+            manifest_records=final_records,
+            config=config,
+            device=device,
+            dtype=dtype,
+            group=group,
+            rank=rank,
+            num_steps=40,
+            solver="flow",
             output_path=os.path.join(config.save_dir, "final_eval", "result.json"),
-            update="final", score_scale=score_scale,
+            update="final",
+            score_scale=score_scale,
         )
     finally:
         ema.copy_temp_to(trainable)
     if rank == 0 and final_result is not None:
         write_json(
             os.path.join(config.save_dir, "final_eval", "per_image.json"),
-            final_result["per_image"], rank=rank,
+            final_result["per_image"],
+            rank=rank,
         )
     final_eval_seconds = time.perf_counter() - final_eval_started
     write_json(
@@ -952,12 +1031,8 @@ def main(_):
                 "initialization": initialization_seconds,
                 "calibration": calibration_seconds,
             },
-            "training_compute_gpu_hours": (
-                cumulative_train_seconds * int(rr.actual_compute_gpu_count) / 3600.0
-            ),
-            "training_reserved_gpu_hours": (
-                cumulative_train_seconds * int(rr.reserved_gpu_count) / 3600.0
-            ),
+            "training_compute_gpu_hours": (cumulative_train_seconds * int(rr.actual_compute_gpu_count) / 3600.0),
+            "training_reserved_gpu_hours": (cumulative_train_seconds * int(rr.reserved_gpu_count) / 3600.0),
             "ended": _now(),
         },
         rank=rank,
