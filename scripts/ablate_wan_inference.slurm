@@ -35,7 +35,7 @@ export APPTAINER_CACHEDIR="${SCRATCH}/apptainer/cache"
 export APPTAINER_TMPDIR="${SCRATCH}/apptainer/tmp"
 export TMPDIR="${SLURM_TMPDIR:-${SCRATCH}/tmp}"
 [[ -f "$SIF" && ! -L "$SIF" ]] || { echo "Missing regular container: $SIF" >&2; exit 1; }
-for input in "config/wan22_inference_ablation.json" "data/video_motion/test.txt" \
+for input in "${ABLATION_CONFIG:-config/wan22_inference_ablation.json}" "data/video_motion/test.txt" \
   "${VIDEO_REWARD_CKPT_PATH}/Wan2.2-TI2V-5B-Diffusers/model_index.json" \
   "${VIDEO_REWARD_CKPT_PATH}/VideoReward/model_config.json" \
   "${VIDEO_REWARD_CKPT_PATH}/waft_tar_c_t.pth"; do
@@ -54,6 +54,7 @@ apptainer exec --nv --bind "$REPO" --bind "$SCRATCH" \
   --env PYTHONNOUSERSITE=1 --env WANDB_MODE=offline \
   --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 --env HF_DATASETS_OFFLINE=1 \
   "$SIF" python scripts/ablate_wan_inference.py \
-    --config config/wan22_inference_ablation.json \
+    --config "${ABLATION_CONFIG:-config/wan22_inference_ablation.json}" \
+    --prompt-index "${PROMPT_INDEX:-0}" \
     --output-dir "$OUTPUT" \
     --policy-device cuda:0 --reward-device cuda:1 --vae-device cuda:0

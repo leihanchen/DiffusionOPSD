@@ -65,6 +65,24 @@ def file_hash(path):
     return digest.hexdigest()
 
 
+def load_checkpoint_list(path):
+    """Load an explicit list of trusted local training checkpoints, never discover implicitly."""
+    entries = json.loads(Path(path).read_text())
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("Checkpoint manifest must be a nonempty list")
+    states, metadata = {}, []
+    for entry in entries:
+        label = entry["label"]
+        if not isinstance(label, str) or not label.isalnum() or label == "base" or label in states:
+            raise ValueError("Checkpoint labels must be unique alphanumeric strings other than base")
+        if type(entry.get("expected_update")) is not int or entry["expected_update"] < 0:
+            raise ValueError("Checkpoint entry requires an expected update")
+        state, info = load_adapter_checkpoint(entry["path"], "training", entry["expected_update"])
+        states[label] = state
+        metadata.append({**info, "label": label, "path": entry["path"], "sha256": file_hash(entry["path"])})
+    return states, metadata
+
+
 def tensor_hash(value):
     return hashlib.sha256(value.detach().float().cpu().contiguous().numpy().tobytes()).hexdigest()
 
@@ -144,7 +162,7 @@ def generate_latents(pipe, roll, cfg, condition, initial, pe, ne, scheduler_fact
     return latents, trace
 
 
-def summarize(rows, conditions=tuple(CONDITIONS)):
+def summarize(rows, conditions=tuple(CONDITIONS), checkpoint_comparisons=None):
     grouped = {}
     for row in rows:
         key = (row["prompt_index"], row["seed"])
@@ -159,7 +177,13 @@ def summarize(rows, conditions=tuple(CONDITIONS)):
         for name, left, right in [("B-A", "B", "A"), ("C-A", "C", "A"), ("D-B", "D", "B")]
         if left in conditions and right in conditions
     ]
-    training_pairs = [pair for pair in comparisons if pair[0] in ("C-A", "D-B")]
+    if checkpoint_comparisons is not None:
+        comparisons = checkpoint_comparisons
+    training_pairs = (
+        comparisons
+        if checkpoint_comparisons is not None
+        else [pair for pair in comparisons if pair[0] in ("C-A", "D-B")]
+    )
     interaction = set(conditions) == set(CONDITIONS)
     paired = []
     for (index, seed), group in grouped.items():
@@ -203,7 +227,7 @@ def summarize(rows, conditions=tuple(CONDITIONS)):
     }
 
 
-def write_review(output, rows, seed=2026, conditions=tuple(CONDITIONS)):
+def write_review(output, rows, seed=2026, conditions=tuple(CONDITIONS), checkpoint_comparisons=None):
     """Copy anonymously named media; keep the unblinding map outside the review folder."""
     review = output / "review"
     review.mkdir()
@@ -225,7 +249,12 @@ def write_review(output, rows, seed=2026, conditions=tuple(CONDITIONS)):
     inverse = {(r["prompt_index"], r["seed"], r["condition"]): label for label, r in mapping.items()}
     pairs = []
     for index, seed_value in sorted({(r["prompt_index"], r["seed"]) for r in rows}):
-        for a, b in [("A", "B"), ("A", "C"), ("B", "D")]:
+        review_pairs = (
+            [(base, trained) for _, trained, base in checkpoint_comparisons]
+            if checkpoint_comparisons is not None
+            else [("A", "B"), ("A", "C"), ("B", "D")]
+        )
+        for a, b in review_pairs:
             if a not in conditions or b not in conditions:
                 continue
             labels = [inverse[index, seed_value, a], inverse[index, seed_value, b]]
@@ -238,9 +267,15 @@ def write_review(output, rows, seed=2026, conditions=tuple(CONDITIONS)):
         writer.writerows([[*pair, "", ""] for pair in pairs])
 
 
-def run_investigation(pipe, reward, judge, cfg, prompts, output, scheduler_factory, wandb_run=None):
+def run_investigation(
+    pipe, reward, judge, cfg, prompts, output, scheduler_factory, wandb_run=None, checkpoint_states=None
+):
     rows = []
     conditions = selected_conditions(getattr(cfg, "sampler", "both"))
+    comparisons = None
+    if checkpoint_states is not None:
+        conditions = ("base", *checkpoint_states)
+        comparisons = [(f"{label}-base", label, "base") for label in checkpoint_states]
     media = {}
     roll = WanRollout(pipe, cfg.num_steps, cfg.guidance_scale)
     devices = sorted({torch.device(x) for x in (cfg.policy_device, cfg.reward_device, cfg.vae_device)}, key=str)
@@ -294,8 +329,17 @@ def run_investigation(pipe, reward, judge, cfg, prompts, output, scheduler_facto
                         for device in cuda_devices:
                             torch.cuda.reset_peak_memory_stats(device)
                         started = time.perf_counter()
+                        generation_condition = condition
+                        if checkpoint_states is not None:
+                            from peft import set_peft_model_state_dict
+
+                            if condition != "base":
+                                set_peft_model_state_dict(
+                                    pipe.transformer, checkpoint_states[condition], adapter_name="default"
+                                )
+                            generation_condition = "A" if condition == "base" else "C"
                         latents, trace = generate_latents(
-                            pipe, roll, cfg, condition, initial, pe, ne, scheduler_factory
+                            pipe, roll, cfg, generation_condition, initial, pe, ne, scheduler_factory
                         )
                         clip = roll.decode01(latents)
                         if (
@@ -366,7 +410,7 @@ def run_investigation(pipe, reward, judge, cfg, prompts, output, scheduler_facto
                             )
                         print(json.dumps({"event": "condition_complete", "completed": len(rows), **row}), flush=True)
                         del latents, clip, geometry, quality
-        summary = summarize(rows, conditions)
+        summary = summarize(rows, conditions, comparisons)
         if wandb_run is not None:
             for category in ("means", "differences", "training"):
                 for name, metrics in summary[category].items():
@@ -409,7 +453,8 @@ def run_investigation(pipe, reward, judge, cfg, prompts, output, scheduler_facto
             wandb_run.log({"investigation/pairs": table}, step=len(rows) + 1, commit=True)
             wandb_run.summary["investigation/num_videos"] = len(rows)
             wandb_run.summary["investigation/num_pairs"] = len(summary["pairs"])
-        write_review(output, rows, conditions=conditions)
+            wandb_run.summary["investigation/num_comparisons"] = sum(len(pair["training"]) for pair in summary["pairs"])
+        write_review(output, rows, conditions=conditions, checkpoint_comparisons=comparisons)
         write_json(output / "summary.json", summary)
         return summary
     except Exception as exc:

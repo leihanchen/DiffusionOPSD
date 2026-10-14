@@ -29,6 +29,11 @@ CHECKPOINT_FORMAT="${CHECKPOINT_FORMAT:-adapter}"
 SAMPLER="${SAMPLER:-both}"
 NUM_PROMPTS="${NUM_PROMPTS:-1}"
 read -r -a SEED_OFFSET_ARGS <<< "${SEED_OFFSETS:-0}"
+POLICY_ARGS=(--policy "$POLICY_PATH")
+if [[ -n "${CHECKPOINT_MANIFEST:-}" ]]; then
+  POLICY_ARGS=(--checkpoint-manifest "$CHECKPOINT_MANIFEST")
+  POLICY_PATH="$CHECKPOINT_MANIFEST"
+fi
 CHECKPOINT_ARGS=(--checkpoint-format "$CHECKPOINT_FORMAT")
 if [[ -n "${EXPECTED_UPDATE:-}" ]]; then
   CHECKPOINT_ARGS+=(--expected-update "$EXPECTED_UPDATE")
@@ -66,6 +71,7 @@ apptainer exec --nv --bind "$REPO" --bind "$SCRATCH" \
   --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 --env HF_DATASETS_OFFLINE=1 \
   "$SIF" python scripts/investigate_wan_inference.py \
     --config "$CONFIG_PATH" --sampler "$SAMPLER" "${CHECKPOINT_ARGS[@]}" \
-    --policy "$POLICY_PATH" --output-dir "$OUTPUT" --num-prompts "$NUM_PROMPTS" \
+    "${POLICY_ARGS[@]}" --output-dir "$OUTPUT" --num-prompts "$NUM_PROMPTS" \
     --seed-offsets "${SEED_OFFSET_ARGS[@]}" \
-    --policy-device cuda:0 --reward-device cuda:1 --vae-device cuda:0
+    --policy-device "${POLICY_DEVICE:-cuda:0}" --reward-device "${REWARD_DEVICE:-cuda:1}" \
+    --vae-device "${VAE_DEVICE:-cuda:0}" --min-gpu-memory-gib "${MIN_GPU_MEMORY_GIB:-0}"

@@ -6,6 +6,7 @@ import csv
 import json
 import math
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -18,6 +19,13 @@ from diffusionopsd.video.wan_geometry import latent_shape_from_pipe
 
 
 CONDITIONS = ("control", "steps30", "resolution480")
+
+
+def euler_latents(roll, pe, ne, initial):
+    """Match the trainer's bf16 model forwards while keeping paired noise in fp32."""
+    context = torch.autocast("cuda", dtype=torch.bfloat16) if initial.is_cuda else nullcontext()
+    with context:
+        return roll.rollout(pe.clone(), ne.clone(), initial.clone(), 0.278).x0
 
 
 def validate_experiment(config):
@@ -33,37 +41,78 @@ def validate_experiment(config):
             "resolution480": {"height": 480, "width": 832, "num_steps": 50},
         },
     }
-    if config != expected:
-        raise ValueError("Config must specify the agreed six-video base-model ablation")
+    scheduler_expected = {
+        **expected,
+        "seeds": [1],
+        "conditions": {
+            f"{sampler}_{name}": {**params, "sampler": sampler}
+            for name, params in expected["conditions"].items()
+            for sampler in ("euler", "native")
+        },
+    }
+    duration_expected = {
+        **scheduler_expected,
+        "conditions": {
+            **scheduler_expected["conditions"],
+            **{
+                f"euler17_{name}": {**params, "sampler": "euler", "num_frames": 17}
+                for name, params in expected["conditions"].items()
+            },
+        },
+    }
+    if config not in (expected, scheduler_expected, duration_expected):
+        raise ValueError("Config must specify an agreed base-model ablation")
     return config
 
 
-def summarize(rows, seeds):
+def summarize(rows, seeds, conditions=CONDITIONS):
     grouped = {seed: {} for seed in seeds}
     for row in rows:
         seed, condition = row["seed"], row["condition"]
-        if seed not in grouped or condition not in CONDITIONS or condition in grouped[seed]:
+        if seed not in grouped or condition not in conditions or condition in grouped[seed]:
             raise ValueError("Unexpected or duplicate ablation sample")
         grouped[seed][condition] = row
-    if not grouped or any(set(group) != set(CONDITIONS) for group in grouped.values()):
+    if not grouped or any(set(group) != set(conditions) for group in grouped.values()):
         raise ValueError("Incomplete ablation")
+    metrics = (
+        *SCORES,
+        *(
+            key
+            for key in ("compute_seconds", "duration_seconds", "playback_duration_seconds")
+            if all(key in row for row in rows)
+        ),
+    )
+    if conditions == CONDITIONS:
+        comparisons = [(name, name, "control") for name in CONDITIONS[1:]]
+    else:
+        comparisons = [(f"native_{name}-euler_{name}", f"native_{name}", f"euler_{name}") for name in CONDITIONS]
+        comparisons += [
+            (f"{sampler}_{name}-{sampler}_control", f"{sampler}_{name}", f"{sampler}_control")
+            for sampler in ("euler", "native")
+            for name in CONDITIONS[1:]
+        ]
+    comparisons += [
+        (f"euler17_{name}-euler_{name}", f"euler17_{name}", f"euler_{name}")
+        for name in CONDITIONS
+        if f"euler17_{name}" in conditions
+    ]
     pairs = [
         {
             "seed": seed,
             "differences": {
-                name: {metric: group[name][metric] - group["control"][metric] for metric in SCORES}
-                for name in CONDITIONS[1:]
+                label: {metric: group[left][metric] - group[right][metric] for metric in metrics}
+                for label, left, right in comparisons
             },
         }
         for seed, group in grouped.items()
     ]
     means = {
-        name: {metric: sum(g[name][metric] for g in grouped.values()) / len(grouped) for metric in SCORES}
-        for name in CONDITIONS
+        name: {metric: sum(g[name][metric] for g in grouped.values()) / len(grouped) for metric in metrics}
+        for name in conditions
     }
     differences = {
-        name: {metric: sum(p["differences"][name][metric] for p in pairs) / len(pairs) for metric in SCORES}
-        for name in CONDITIONS[1:]
+        name: {metric: sum(p["differences"][name][metric] for p in pairs) / len(pairs) for metric in metrics}
+        for name, _, _ in comparisons
     }
     return {
         "status": "complete",
@@ -71,8 +120,8 @@ def summarize(rows, seeds):
         "means": means,
         "differences": differences,
         "pairs": pairs,
-        "interpretation": "One prompt, two seeds; descriptive results. Resolution changes noise shape and "
-        "pixel-based motion/geometry scales; raw differences need visual interpretation.",
+        "interpretation": f"One prompt, {len(seeds)} seed(s); descriptive results. Resolution and frame count change "
+        "noise shape; pixel motion scales with resolution. Duration comparisons use the same seed, not identical noise.",
     }
 
 
@@ -96,10 +145,10 @@ def run_ablation(pipe, reward, judge, cfg, experiment, prompt, output, scheduler
         )[:2]
         for seed in experiment["seeds"]:
             noises = {}
-            for condition in CONDITIONS:
+            for condition in experiment["conditions"]:
                 params = experiment["conditions"][condition]
                 height, width = params["height"], params["width"]
-                frames, steps = experiment["num_frames"], params["num_steps"]
+                frames, steps = params.get("num_frames", experiment["num_frames"]), params["num_steps"]
                 current = {"phase": "generation", "seed": seed, "condition": condition}
                 print(json.dumps({"event": "condition_start", **current}), flush=True)
                 shape = latent_shape_from_pipe(pipe, frames, height, width)
@@ -110,7 +159,11 @@ def run_ablation(pipe, reward, judge, cfg, experiment, prompt, output, scheduler
                         dtype=torch.float32,
                         generator=torch.Generator(cfg.policy_device).manual_seed(seed),
                     )
-                    noise_file = f"seed_{seed}_{width}x{height}_initial.pt"
+                    noise_file = (
+                        f"seed_{seed}_{width}x{height}_{frames}frames_initial.pt"
+                        if "num_frames" in params
+                        else f"seed_{seed}_{width}x{height}_initial.pt"
+                    )
                     torch.save(noise.cpu(), output / noise_file)
                     noises[shape] = noise, noise_file
                 initial, noise_file = noises[shape]
@@ -124,18 +177,22 @@ def run_ablation(pipe, reward, judge, cfg, experiment, prompt, output, scheduler
                 for device in cuda_devices:
                     torch.cuda.reset_peak_memory_stats(device)
                 started = time.perf_counter()
-                latents = pipe(
-                    prompt_embeds=pe.clone(),
-                    negative_prompt_embeds=ne.clone(),
-                    latents=initial.clone(),
-                    height=height,
-                    width=width,
-                    num_frames=frames,
-                    num_inference_steps=steps,
-                    guidance_scale=experiment["guidance_scale"],
-                    output_type="latent",
-                    return_dict=False,
-                )[0]
+                sampler = params.get("sampler", "native")
+                if sampler == "euler":
+                    latents = euler_latents(WanRollout(pipe, steps, experiment["guidance_scale"]), pe, ne, initial)
+                else:
+                    latents = pipe(
+                        prompt_embeds=pe.clone(),
+                        negative_prompt_embeds=ne.clone(),
+                        latents=initial.clone(),
+                        height=height,
+                        width=width,
+                        num_frames=frames,
+                        num_inference_steps=steps,
+                        guidance_scale=experiment["guidance_scale"],
+                        output_type="latent",
+                        return_dict=False,
+                    )[0]
                 if latents.shape != initial.shape or not torch.isfinite(latents).all():
                     raise ValueError("Invalid generated latents")
                 current["phase"] = "decode"
@@ -166,6 +223,8 @@ def run_ablation(pipe, reward, judge, cfg, experiment, prompt, output, scheduler
                     **params,
                     "num_frames": frames,
                     "guidance_scale": experiment["guidance_scale"],
+                    "playback_duration_seconds": frames / experiment["fps"],
+                    "fps": experiment["fps"],
                     "video": video,
                     "initial_latents": noise_file,
                     **hashes,
@@ -177,7 +236,7 @@ def run_ablation(pipe, reward, judge, cfg, experiment, prompt, output, scheduler
                     row[f"{device}_peak_allocated_bytes"] = torch.cuda.max_memory_allocated(device)
                     row[f"{device}_peak_reserved_bytes"] = torch.cuda.max_memory_reserved(device)
                 trace = {
-                    "sampler": "native",
+                    "sampler": sampler,
                     "scheduler_class": type(pipe.scheduler).__name__,
                     "timesteps": pipe.scheduler.timesteps.float().cpu().tolist(),
                     "sigmas": pipe.scheduler.sigmas.float().cpu().tolist(),
@@ -195,7 +254,7 @@ def run_ablation(pipe, reward, judge, cfg, experiment, prompt, output, scheduler
                 import wandb
 
                 caption = (
-                    f"base Wan2.2 | UniPC | {condition} | seed={seed} | {width}x{height} | "
+                    f"base Wan2.2 | {sampler} | {condition} | seed={seed} | {width}x{height} | "
                     f"steps={steps} | frames={frames} | {prompt}"
                 )
                 wandb_run.log(
@@ -210,11 +269,12 @@ def run_ablation(pipe, reward, judge, cfg, experiment, prompt, output, scheduler
                         f"ablation/videos/{condition}": wandb.Video(str(output / video), format="mp4", caption=caption),
                     },
                     step=len(rows),
+                    commit=True,
                 )
                 print(json.dumps({"event": "condition_complete", **row}), flush=True)
                 del latents, clip, geometry, quality
         current = {"phase": "summary"}
-        summary = summarize(rows, experiment["seeds"])
+        summary = summarize(rows, experiment["seeds"], tuple(experiment["conditions"]))
         for category in ("means", "differences"):
             for name, metrics in summary[category].items():
                 for metric, value in metrics.items():

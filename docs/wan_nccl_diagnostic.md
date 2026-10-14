@@ -29,3 +29,35 @@ This standalone diagnostic requests one node, four A100 GPUs, two workers, two C
 Results are written to `logs/nccl-probe-JOBID/rank_0.json`, `rank_1.json`, and `summary.json`; Slurm stdout and stderr use `logs/wan-nccl-probe-JOBID.out` and `.err`. A passed communication probe does not verify model loading, OPSD target construction, training memory consumption, or a Wan optimizer update.
 
 Original experiment evidence is retained locally under `logs/nccl-diagnostic-5217175/`. The full training retry 5280212 was held during diagnosis and requires a separate decision before release.
+
+## Killarney: route-based socket selection (job 6160389)
+
+Job 6160389 failed during process-group initialization, before model loading.
+NCCL selected `ib0` and peers could not reach rank 0 at `10.0.1.172:33939`
+(`No route to host`). Node hostname `kn172` resolves to `10.1.1.172`.
+The container also lacked usable `libibverbs`, causing fallback to socket transport.
+The logs establish a failed socket path, but do not establish whether routing,
+firewall policy, or fabric availability caused the failure.
+
+Scalable workers now select the IPv4 interface whose address matches the kernel's
+route source for `MASTER_ADDR`, before initializing NCCL. This runs inside each
+worker, so it does not depend on a cluster name, an interface named `eth0`, or the
+login node's network layout. An explicit `NCCL_SOCKET_IFNAME` takes precedence.
+Missing, ambiguous, or loopback route mappings fail with an actionable error.
+The `nccl_network` trace records the selected interface and addresses.
+
+This is Linux/IPv4 discovery. It does not prove peer reachability, install RDMA
+libraries, select an RDMA HCA, or guarantee optimal network performance. IPv6 or
+special multi-rail deployments should provide an explicit interface override.
+No `NCCL_IB_DISABLE` workaround is applied.
+
+Verification: focused route/override/failure tests, the full video suite, and a real
+login-node route check passed. Job 6166490 completed successfully on two H100
+nodes, one worker with two GPUs per node: metadata gathering, tensor reductions,
+and balanced/zero-retention optimizer updates passed. Job 6166321 (the superseded
+hardcoded eth0 test) was cancelled.
+
+The full eight-worker, four-node training recovery job 6166613 subsequently
+completed updates 6 and 7 successfully, with consistent adapter states and a
+saved checkpoint. This verifies the tested communication and short training
+workload; full-epoch stability remains unverified.

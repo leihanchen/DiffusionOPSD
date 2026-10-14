@@ -32,6 +32,7 @@ from peft import get_peft_model_state_dict, set_peft_model_state_dict
 
 from diffusionopsd.metrics import install_wandb_jsonl_tee
 from diffusionopsd.stat_tracking import PerPromptStatTracker
+from diffusionopsd.video.nccl_network import configure_socket_interface
 from diffusionopsd.video.branch_loss import branch_loss
 from diffusionopsd.video.distributed_epoch import (
     active_cuda_devices,
@@ -313,6 +314,7 @@ def main(_):
     if FLAGS.scalable_two_gpu:
         # Slurm snapshots batch scripts at submission; queued jobs use this live entry point.
         _trace("nccl_environment", **configure_isolated_worker_nccl())
+        _trace("nccl_network", **configure_socket_interface(os.environ["MASTER_ADDR"]))
     torch.cuda.set_device(0)
     faulthandler.enable()
     # CPython's timer dumps thread frames without the GIL and can itself segfault

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Six base-Wan2.2 videos: native UniPC control, fewer steps, and lower resolution."""
+"""Base-Wan2.2 generation comparisons across scheduler, steps, and resolution."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ def parse_args(argv=None):
     parser.add_argument("--config", type=Path, default=Path("config/wan22_inference_ablation.json"))
     parser.add_argument("--model", default="${VIDEO_REWARD_CKPT_PATH}/Wan2.2-TI2V-5B-Diffusers")
     parser.add_argument("--prompts", type=Path, default=Path("data/video_motion/test.txt"))
+    parser.add_argument("--prompt-index", type=int, default=0, help="Zero-based index among nonempty prompts")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--policy-device", default="cuda:0")
     parser.add_argument("--vae-device", default="cuda:0")
@@ -30,8 +31,8 @@ def parse_args(argv=None):
         contents = args.config.read_bytes()
         experiment = validate_experiment(json.loads(contents))
         prompts = [line.strip() for line in args.prompts.read_text().splitlines() if line.strip()]
-        if not prompts:
-            raise ValueError("Prompt file is empty")
+        if not 0 <= args.prompt_index < len(prompts):
+            raise ValueError("Prompt index is outside the prompt file")
         root = Path(os.environ["VIDEO_REWARD_CKPT_PATH"])
         for path in [
             Path(args.model) / "model_index.json",
@@ -53,7 +54,7 @@ def parse_args(argv=None):
         parser.error(str(exc))
     args.config = args.config.resolve()
     args.config_sha256 = hashlib.sha256(contents).hexdigest()
-    return args, experiment, prompts[0]
+    return args, experiment, prompts[args.prompt_index]
 
 
 def main(argv=None):
@@ -65,7 +66,7 @@ def main(argv=None):
         "arguments": vars(cfg),
         "experiment": experiment,
         "prompt": prompt,
-        "expected_videos": 6,
+        "expected_videos": len(experiment["seeds"]) * len(experiment["conditions"]),
         "weights": "base_only",
         "negative_prompt": "",
         "precision": {
@@ -106,8 +107,10 @@ def main(argv=None):
         )
         write_json(output / "manifest.json", manifest)
         run = wandb.init(
-            project="diffusionopsd",
-            name=f"wan22-ablation-{os.environ.get('SLURM_JOB_ID', output.name)}",
+            project=os.environ.get("WANDB_PROJECT", "diffusionopsd"),
+            entity=os.environ.get("WANDB_ENTITY"),
+            name=f"job-{os.environ.get('SLURM_JOB_ID', output.name)}-eval{cfg.prompt_index + 1}-scheduler-ablation-"
+            f"{os.environ.get('SLURM_CLUSTER_NAME', 'unknown')}",
             dir=str(output),
             mode="offline",
             config={
@@ -115,10 +118,12 @@ def main(argv=None):
                 "experiment": experiment,
                 "weights": "base_only",
                 "negative_prompt": "",
-                "sampler": "native_unipc",
+                "samplers": sorted({p.get("sampler", "native") for p in experiment["conditions"].values()}),
                 "precision": manifest["precision"],
             },
         )
+        manifest["wandb"] = {"id": run.id, "entity": run.entity, "project": run.project}
+        write_json(output / "manifest.json", manifest)
         pipe = WanPipeline.from_pretrained(cfg.model, torch_dtype=torch.bfloat16, local_files_only=True)
         pipe.to(cfg.policy_device)
         pipe.vae.to(cfg.vae_device)
@@ -147,9 +152,11 @@ def main(argv=None):
             lambda: UniPCMultistepScheduler.from_config(scheduler_config),
             run,
         )
-        run.finish()
         manifest["status"] = "complete"
         write_json(output / "manifest.json", manifest)
+        for name in ("manifest.json", "summary.json", "samples.jsonl", "samples.csv"):
+            run.save(str(output / name), base_path=str(output), policy="now")
+        run.finish()
     except Exception as exc:
         if not (output / "failure.json").exists():
             write_json(

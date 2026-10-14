@@ -1,0 +1,4 @@
+[
+  {"label": "step5", "path": "logs/wan22-scaled-step4-single-node-recovery1/training_state.pt", "expected_update": 5},
+  {"label": "step7", "path": "logs/wan22-scaled-step5-eight-worker-killarney-recovery2/training_state.pt", "expected_update": 7}
+]

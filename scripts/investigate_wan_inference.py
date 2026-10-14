@@ -27,7 +27,10 @@ def parse_args(argv=None):
     config_parser.add_argument("--config", type=Path, help="Inference JSON preset; explicit CLI options override it")
     selected, _ = config_parser.parse_known_args(argv)
     p = argparse.ArgumentParser(description=__doc__, parents=[config_parser], allow_abbrev=False)
-    p.add_argument("--policy", required=True, type=Path)
+    inputs = p.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--policy", type=Path)
+    inputs.add_argument("--checkpoint-manifest", type=Path)
+    p.add_argument("--min-gpu-memory-gib", type=float, default=0)
     p.add_argument(
         "--checkpoint-format",
         choices=("adapter", "training"),
@@ -84,7 +87,9 @@ def parse_args(argv=None):
         p.error("Seed offsets must be distinct and nonnegative")
     if max(a.seed_offsets) + a.num_prompts - 1 >= 2**63:
         p.error("Seeds must fit in a signed 64-bit integer")
-    for path in (a.policy, a.prompts, Path(a.model) / "model_index.json"):
+    if a.checkpoint_manifest and a.sampler != "euler":
+        p.error("Checkpoint comparisons currently require --sampler euler")
+    for path in (a.policy or a.checkpoint_manifest, a.prompts, Path(a.model) / "model_index.json"):
         if not path.is_file():
             p.error(f"Required local file missing: {path}")
     if "VIDEO_REWARD_CKPT_PATH" not in os.environ:
@@ -127,11 +132,15 @@ def main(argv=None):
             result = subprocess.run(["git", *args], capture_output=True, text=True, check=False)
             return result.stdout.strip() if result.returncode == 0 else "unavailable"
 
+        if cfg.min_gpu_memory_gib:
+            capacity = torch.cuda.get_device_properties(cfg.policy_device).total_memory / 2**30
+            if capacity < cfg.min_gpu_memory_gib:
+                raise ValueError(f"GPU capacity {capacity:.1f} GiB below requested minimum")
         manifest = {
             "arguments": vars(cfg),
             "prompts": prompts,
             "seeds": [[i + offset for offset in cfg.seed_offsets] for i in range(len(prompts))],
-            "checkpoint_sha256": file_hash(cfg.policy),
+            "checkpoint_sha256": file_hash(cfg.policy or cfg.checkpoint_manifest),
             "prompt_file_sha256": file_hash(cfg.prompts),
             "git_sha": git("rev-parse", "HEAD"),
             "git_status": git("status", "--porcelain"),
@@ -156,7 +165,16 @@ def main(argv=None):
             "expected_videos": len(prompts) * len(cfg.seed_offsets) * len(selected_conditions(cfg.sampler)),
             "status": "running",
         }
-        state, checkpoint_metadata = load_adapter_checkpoint(cfg.policy, cfg.checkpoint_format, cfg.expected_update)
+        checkpoint_states = None
+        if cfg.checkpoint_manifest:
+            from diffusionopsd.video.inference_investigation import load_checkpoint_list
+
+            checkpoint_states, checkpoint_metadata = load_checkpoint_list(cfg.checkpoint_manifest)
+            state = next(iter(checkpoint_states.values()))
+            manifest["conditions"] = ["base", *checkpoint_states]
+            manifest["expected_videos"] = len(prompts) * len(cfg.seed_offsets) * len(manifest["conditions"])
+        else:
+            state, checkpoint_metadata = load_adapter_checkpoint(cfg.policy, cfg.checkpoint_format, cfg.expected_update)
         manifest["checkpoint"] = checkpoint_metadata
         write_json(output / "manifest.json", manifest)
         run = wandb.init(
@@ -179,6 +197,8 @@ def main(argv=None):
         scheduler_config = dict(pipe.scheduler.config)
         policy = attach_lora(pipe.transformer, None)
         validate_adapter(get_peft_model_state_dict(policy, adapter_name="default"), state)
+        for candidate in (checkpoint_states or {"single": state}).values():
+            validate_adapter(get_peft_model_state_dict(policy, adapter_name="default"), candidate)
         set_peft_model_state_dict(policy, state, adapter_name="default")
         del state
         pipe.transformer = policy
@@ -201,6 +221,7 @@ def main(argv=None):
             output,
             lambda: UniPCMultistepScheduler.from_config(scheduler_config),
             run,
+            checkpoint_states=checkpoint_states,
         )
         manifest = json.loads((output / "manifest.json").read_text())
         manifest["status"] = "complete"

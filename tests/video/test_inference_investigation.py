@@ -346,3 +346,71 @@ def test_cli_validates_before_loading_models(tmp_path, monkeypatch):
     for flags in [["--seed-offsets", "0", "0"], ["--width", "33"], ["--num-frames", "1"], ["--guidance-scale", "nan"]]:
         with pytest.raises(SystemExit):
             parse_args(args + flags)
+
+
+def test_checkpoint_list_comparisons():
+    from diffusionopsd.video.inference_investigation import summarize, SCORES
+
+    rows = [
+        dict(prompt_index=i, seed=i, condition=c, **{k: 1.0 for k in SCORES})
+        for i in range(2)
+        for c in ("base", "step5", "step7")
+    ]
+    result = summarize(
+        rows, ("base", "step5", "step7"), [("step5-base", "step5", "base"), ("step7-base", "step7", "base")]
+    )
+    assert result["num_videos"] == 6
+    assert sum(len(p["training"]) for p in result["pairs"]) == 4
+
+
+def test_checkpoint_list_validation(tmp_path):
+    checkpoint = tmp_path / "state.pt"
+    torch.save({"policy_default": {"x": torch.ones(2)}, "next_update": 5}, checkpoint)
+    manifest = tmp_path / "checkpoints.json"
+    entry = dict(label="step5", path=str(checkpoint), expected_update=5)
+    manifest.write_text(json.dumps([entry]))
+    states, metadata = inv.load_checkpoint_list(manifest)
+    assert list(states) == ["step5"]
+    assert metadata[0]["next_update"] == 5
+    manifest.write_text(json.dumps([entry, entry]))
+    with pytest.raises(ValueError, match="unique"):
+        inv.load_checkpoint_list(manifest)
+    entry["expected_update"] = 7
+    manifest.write_text(json.dumps([entry]))
+    with pytest.raises(ValueError, match="Expected checkpoint update"):
+        inv.load_checkpoint_list(manifest)
+
+
+def test_three_model_run_shares_inputs_and_replaces_adapter(tmp_path, monkeypatch):
+    import csv
+    import peft
+
+    pipe, cfg, out = setup(tmp_path, monkeypatch)
+    cfg.sampler = "euler"
+    cfg.seed_offsets = [0]
+    loaded = []
+
+    def replace(policy, state, adapter_name):
+        assert adapter_name == "default"
+        loaded.append(state["weight"].item())
+        policy.weight.data.fill_(state["weight"].item())
+
+    monkeypatch.setattr(peft, "set_peft_model_state_dict", replace)
+    summary = inv.run_investigation(
+        pipe,
+        Reward(),
+        Judge(),
+        cfg,
+        ["first", "second"],
+        out,
+        Scheduler,
+        checkpoint_states={"step5": {"weight": torch.tensor(5.0)}, "step7": {"weight": torch.tensor(7.0)}},
+    )
+    assert loaded == [5.0, 7.0, 5.0, 7.0]
+    assert summary["num_videos"] == 6
+    for start in (0, 3):
+        base, five, seven = pipe.calls[start : start + 3]
+        assert base[3] and not five[3] and not seven[3]
+        assert all(torch.equal(base[j], five[j]) and torch.equal(base[j], seven[j]) for j in range(3))
+    with (out / "review/preferences.csv").open() as stream:
+        assert len(list(csv.DictReader(stream))) == 4

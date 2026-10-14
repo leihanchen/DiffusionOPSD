@@ -141,3 +141,89 @@ def test_rejects_adapter_and_changed_experiment(tmp_path, monkeypatch):
     pipe.transformer.peft_config = {"default": {}}
     with pytest.raises(ValueError, match="without LoRA"):
         ab.run_ablation(pipe, Reward(), Judge(), cfg, experiment, "chessboard", tmp_path, None, None)
+
+
+def test_scheduler_comparison_summary():
+    experiment = json.loads(
+        (Path(__file__).resolve().parents[2] / "config/wan22_eval2_scheduler_ablation.json").read_text()
+    )
+    ab.validate_experiment(experiment)
+    conditions = tuple(experiment["conditions"])
+    rows = [dict(seed=1, condition=c, **{k: float(i) for k in ab.SCORES}) for i, c in enumerate(conditions)]
+    summary = ab.summarize(rows, [1], conditions)
+    assert summary["num_videos"] == 6
+    assert summary["differences"]["native_control-euler_control"]["geo"] == 1
+    with pytest.raises(ValueError):
+        ab.summarize(rows[:-1], [1], conditions)
+
+
+@pytest.mark.parametrize("short_frames", [False, True])
+def test_six_scheduler_videos_and_wandb_media(tmp_path, monkeypatch, short_frames):
+    import wandb
+
+    cfg, _ = fixture_config(tmp_path, monkeypatch)
+    filename = "wan22_eval2_duration_ablation.json" if short_frames else "wan22_eval2_scheduler_ablation.json"
+    experiment = json.loads((Path(__file__).resolve().parents[2] / "config" / filename).read_text())
+    ab.validate_experiment(experiment)
+    experiment["num_frames"] = 5
+    for name, params in experiment["conditions"].items():
+        params.update(height=32, width=32 if name.endswith("resolution480") else 64)
+        if "num_frames" in params:
+            params["num_frames"] = 3
+    euler_inputs = []
+
+    class EulerRoll(Roll):
+        def __init__(self, pipe, steps, guidance):
+            self.pipe, self.steps = pipe, steps
+
+        def rollout(self, pe, ne, initial, query):
+            euler_inputs.append(initial.clone())
+            self.pipe.scheduler.timesteps = torch.linspace(1000, 1, self.steps)
+            self.pipe.scheduler.sigmas = torch.linspace(1, 0, self.steps + 1)
+            return SimpleNamespace(x0=initial.add_(0.02))
+
+    monkeypatch.setattr(ab, "WanRollout", EulerRoll)
+    pipe = Pipe()
+    run = wandb.init(project="diffusionopsd-test", mode="offline", dir=str(tmp_path))
+    try:
+        summary = ab.run_ablation(
+            pipe, Reward(), Judge(), cfg, experiment, "wind chime", tmp_path, lambda: SimpleNamespace(used=False), run
+        )
+    finally:
+        run.finish()
+    assert summary["num_videos"] == (9 if short_frames else 6)
+    rows = [json.loads(line) for line in (tmp_path / "samples.jsonl").read_text().splitlines()]
+    if short_frames:
+        assert [r["num_frames"] for r in rows] == [5] * 6 + [3] * 3
+        assert len({r["initial_latents"] for r in rows}) == 4
+        assert "euler17_control-euler_control" in summary["differences"]
+        assert summary["differences"]["euler17_control-euler_control"]["playback_duration_seconds"] == -0.25
+        assert "compute_seconds" in summary["means"]["euler17_control"]
+    for i in range(3):
+        assert torch.equal(euler_inputs[i], pipe.calls[i]["latents"])
+        assert rows[2 * i]["initial_latent_hash"] == rows[2 * i + 1]["initial_latent_hash"]
+    assert len(list(tmp_path.glob("wandb/offline-run-*/files/media/videos/**/*.mp4"))) == (9 if short_frames else 6)
+
+
+def test_euler_bfloat16_weights_with_float32_noise(monkeypatch):
+    from contextlib import contextmanager
+
+    convolution = torch.nn.Conv3d(1, 1, 1).to(dtype=torch.bfloat16)
+    original_autocast = torch.autocast
+    calls = []
+
+    @contextmanager
+    def cpu_surrogate(device_type, dtype):
+        assert device_type == "cuda" and dtype == torch.bfloat16
+        calls.append(device_type)
+        with original_autocast("cpu", dtype=dtype):
+            yield
+
+    monkeypatch.setattr(torch, "autocast", cpu_surrogate)
+    noise = torch.ones(1, 1, 2, 2, 2, dtype=torch.float32)
+    initial = SimpleNamespace(is_cuda=True, clone=lambda: noise.clone())
+    roll = SimpleNamespace(rollout=lambda pe, ne, z, sigma: SimpleNamespace(x0=convolution(z)))
+    output = ab.euler_latents(roll, torch.ones(1), torch.zeros(1), initial)
+    assert calls == ["cuda"]
+    assert torch.isfinite(output).all()
+    assert noise.dtype == torch.float32 and torch.equal(noise, torch.ones_like(noise))

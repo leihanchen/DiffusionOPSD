@@ -12,9 +12,12 @@ import traceback
 import torch
 import torch.distributed as dist
 
+from diffusionopsd.video.nccl_network import configure_socket_interface
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--expected-nodes", type=int, default=1)
     parser.add_argument("--gpus-per-worker", type=int, default=2)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
@@ -22,6 +25,8 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     result = {"rank": rank, "status": "FAILED"}
     try:
+        result["network"] = configure_socket_interface(os.environ["MASTER_ADDR"])
+        print(json.dumps({"event": "network", **result["network"]}), flush=True)
         count = torch.cuda.device_count()
         if world != 2 or count != args.gpus_per_worker:
             raise ValueError(f"Expected two workers with {args.gpus_per_worker} GPUs each; got {world=}, {count=}")
@@ -52,8 +57,8 @@ def main():
         placements = [None] * world
         dist.all_gather_object(placements, placement)
         uuids = [uuid for item in placements for uuid in item["gpu_uuids"]]
-        if len({p["host"] for p in placements}) != 1 or len(set(uuids)) != world * count:
-            raise RuntimeError(f"Workers must use distinct GPUs on one node: {placements}")
+        if len({p["host"] for p in placements}) != args.expected_nodes or len(set(uuids)) != world * count:
+            raise RuntimeError(f"Workers must use distinct GPUs on the expected number of nodes: {placements}")
         for size in (8, 1_000_000):
             value = torch.full((size,), float(rank + 1), device="cuda:0")
             dist.all_reduce(value)

@@ -1,0 +1,67 @@
+{
+  "num_frames": 121,
+  "guidance_scale": 5.0,
+  "fps": 8,
+  "seeds": [
+    1
+  ],
+  "conditions": {
+    "euler_control": {
+      "height": 704,
+      "width": 1280,
+      "num_steps": 50,
+      "sampler": "euler"
+    },
+    "native_control": {
+      "height": 704,
+      "width": 1280,
+      "num_steps": 50,
+      "sampler": "native"
+    },
+    "euler_steps30": {
+      "height": 704,
+      "width": 1280,
+      "num_steps": 30,
+      "sampler": "euler"
+    },
+    "native_steps30": {
+      "height": 704,
+      "width": 1280,
+      "num_steps": 30,
+      "sampler": "native"
+    },
+    "euler_resolution480": {
+      "height": 480,
+      "width": 832,
+      "num_steps": 50,
+      "sampler": "euler"
+    },
+    "native_resolution480": {
+      "height": 480,
+      "width": 832,
+      "num_steps": 50,
+      "sampler": "native"
+    },
+    "euler17_control": {
+      "height": 704,
+      "width": 1280,
+      "num_steps": 50,
+      "sampler": "euler",
+      "num_frames": 17
+    },
+    "euler17_steps30": {
+      "height": 704,
+      "width": 1280,
+      "num_steps": 30,
+      "sampler": "euler",
+      "num_frames": 17
+    },
+    "euler17_resolution480": {
+      "height": 480,
+      "width": 832,
+      "num_steps": 50,
+      "sampler": "euler",
+      "num_frames": 17
+    }
+  }
+}

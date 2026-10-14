@@ -28,6 +28,7 @@ export MASTER_PORT="$((20000 + SLURM_JOB_ID % 20000))"
 srun --label --ntasks=2 --ntasks-per-node=2 --cpus-per-task=2 \
   --gpus-per-task=a100:2 --gpu-bind=per_task:2 --kill-on-bad-exit=1 \
   bash -c 'exec apptainer exec --nv --bind "$NCCL_PROBE_REPO" --bind "$SCRATCH" \
+    --bind "$NCCL_PROBE_REPO/src:/opt/venv/lib/python3.12/site-packages/diffusionopsd" \
     --pwd "$NCCL_PROBE_REPO" --env "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" \
     --env PYTHONNOUSERSITE=1 --env NCCL_DEBUG=INFO \
     --env "NCCL_P2P_DISABLE=$NCCL_P2P_DISABLE" --env "NCCL_CUMEM_HOST_ENABLE=$NCCL_CUMEM_HOST_ENABLE" \
