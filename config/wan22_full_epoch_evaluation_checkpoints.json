@@ -1,0 +1,12 @@
+[
+  {
+    "label": "step7",
+    "path": "logs/wan22-scaled-step5-eight-worker-killarney-recovery2/training_state.pt",
+    "expected_update": 7
+  },
+  {
+    "label": "step50",
+    "path": "logs/wan22-scaled-epoch-completion-killarney-20261018/training_state.pt",
+    "expected_update": 50
+  }
+]

@@ -16,6 +16,7 @@ num_batches_per_epoch batches, then a single optimizer.step() per epoch.
 Run:  torchrun --standalone --nproc_per_node=8 opd/train_diffusionopd_open3.py
 Env same as DanceOPD (SAVE_DIR, LOG_DIR, OPD_TEACHER_LORAS, BENCHMARK=1, ...).
 """
+
 import os
 import sys
 import json
@@ -25,10 +26,20 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from opd_common import (  # noqa: E402
-    setup_distributed, cleanup_distributed, is_main_process,
-    TextPromptDataset, DistributedKRepeatSampler, compute_text_embeddings,
-    build_models, rollout, student_velocity, teacher_velocities, save_ckpt,
-    maybe_resume, BenchmarkTimer, flow_transition_mean,
+    setup_distributed,
+    cleanup_distributed,
+    is_main_process,
+    TextPromptDataset,
+    DistributedKRepeatSampler,
+    compute_text_embeddings,
+    build_models,
+    rollout,
+    student_velocity,
+    teacher_velocities,
+    save_ckpt,
+    maybe_resume,
+    BenchmarkTimer,
+    flow_transition_mean,
 )
 from configs.opd_config import get_config  # noqa: E402
 
@@ -36,7 +47,8 @@ METHOD = "diffusionopd"
 
 
 def main():
-    rank = int(os.environ["RANK"]); world_size = int(os.environ["WORLD_SIZE"])
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ["LOCAL_RANK"])
     setup_distributed(rank, local_rank, world_size)
     device = torch.device(f"cuda:{local_rank}")
@@ -51,8 +63,11 @@ def main():
     run_done_path = os.path.join(config.save_dir, "run_done.json")
     if os.path.exists(run_done_path) and not bench_on:
         if is_main_process(rank):
-            print(f"[{METHOD}] run_done.json exists — already complete at {config.save_dir}; nothing to do.", flush=True)
-        cleanup_distributed(); return
+            print(
+                f"[{METHOD}] run_done.json exists — already complete at {config.save_dir}; nothing to do.", flush=True
+            )
+        cleanup_distributed()
+        return
     ck_root = os.path.join(config.save_dir, "checkpoints")
     if not bench_on and os.path.isdir(ck_root):
         cks = sorted([int(d.split("-")[-1]) for d in os.listdir(ck_root) if d.startswith("checkpoint-")])
@@ -61,26 +76,41 @@ def main():
     if not config.opd.teacher_loras:
         raise ValueError("OPD_TEACHER_LORAS must give 3 teacher LoRA dirs; see opd/README.md.")
     if is_main_process(rank):
-        os.makedirs(config.save_dir, exist_ok=True); os.makedirs(config.logdir, exist_ok=True)
+        os.makedirs(config.save_dir, exist_ok=True)
+        os.makedirs(config.logdir, exist_ok=True)
         print(f"[{METHOD}] teachers={config.opd.teacher_loras} save_dir={config.save_dir} bench={bench_on}", flush=True)
 
-    (pipeline, transformer_ddp, teacher_names, text_encoders, tokenizers,
-     optimizer, ema, scaler, trainable, mp_dtype) = build_models(config, device, rank, local_rank)
+    (
+        pipeline,
+        transformer_ddp,
+        teacher_names,
+        text_encoders,
+        tokenizers,
+        optimizer,
+        ema,
+        scaler,
+        trainable,
+        mp_dtype,
+    ) = build_models(config, device, rank, local_rank)
     enable_amp = mp_dtype is not None
 
     train_dataset = TextPromptDataset(config.dataset, "train")
-    sampler = DistributedKRepeatSampler(train_dataset, config.sample.train_batch_size,
-                                        config.sample.num_image_per_prompt, world_size, rank, seed=0)
-    loader = DataLoader(train_dataset, batch_sampler=sampler, num_workers=0,
-                        collate_fn=train_dataset.collate_fn, pin_memory=True)
+    sampler = DistributedKRepeatSampler(
+        train_dataset, config.sample.train_batch_size, config.sample.num_image_per_prompt, world_size, rank, seed=0
+    )
+    loader = DataLoader(
+        train_dataset, batch_sampler=sampler, num_workers=0, collate_fn=train_dataset.collate_fn, pin_memory=True
+    )
     train_iter = iter(loader)
     neg_embed, neg_pooled = compute_text_embeddings([""], text_encoders, tokenizers, 128, device)
     neg_embed = neg_embed.repeat(config.sample.train_batch_size, 1, 1)
     neg_pooled = neg_pooled.repeat(config.sample.train_batch_size, 1)
-    first_epoch, global_step = maybe_resume(config, transformer_ddp, optimizer, scaler, ema,
-                                            device, enable_amp, world_size)
+    first_epoch, global_step = maybe_resume(
+        config, transformer_ddp, optimizer, scaler, ema, device, enable_amp, world_size
+    )
 
-    warmup = int(os.environ.get("BENCH_WARMUP", "2")); measured = int(os.environ.get("BENCH_MEASURED", "6"))
+    warmup = int(os.environ.get("BENCH_WARMUP", "2"))
+    measured = int(os.environ.get("BENCH_MEASURED", "6"))
     bench = BenchmarkTimer(config, world_size, warmup, measured) if bench_on else None
     n_updates = (warmup + measured) if bench_on else config.num_epochs
     grad_accum = config.train.gradient_accumulation_steps
@@ -96,8 +126,16 @@ def main():
             prompts, _ = next(train_iter)
             embeds, pooled = compute_text_embeddings(prompts, text_encoders, tokenizers, 128, device)
             _, traj_latents, sigmas, _ = rollout(
-                config, pipeline, transformer_ddp, embeds, pooled, neg_embed[:len(prompts)],
-                neg_pooled[:len(prompts)], device, mp_dtype)
+                config,
+                pipeline,
+                transformer_ddp,
+                embeds,
+                pooled,
+                neg_embed[: len(prompts)],
+                neg_pooled[: len(prompts)],
+                device,
+                mp_dtype,
+            )
 
             # DiffusionOPD distills the teacher transition mean over all denoising steps.
             # At each on-policy state z_t, match the solver's prev_sample_mean (deterministic, eta=0) of
@@ -114,33 +152,44 @@ def main():
                     v_student = student_velocity(transformer_ddp, z_t, sigma_t, embeds, pooled)
                     mean_student = flow_transition_mean(z_t, v_student.float(), sigmas, step_idx, eta=0.0)
                     step_loss = sum(
-                        w[j] * torch.nn.functional.mse_loss(
-                            mean_student,
-                            flow_transition_mean(z_t, v_teachers[j].float(), sigmas, step_idx, eta=0.0))
+                        w[j]
+                        * torch.nn.functional.mse_loss(
+                            mean_student, flow_transition_mean(z_t, v_teachers[j].float(), sigmas, step_idx, eta=0.0)
+                        )
                         for j in range(len(v_teachers))
                     ) / (sum(w) * num_steps * grad_accum)
                 scaler.scale(step_loss).backward()
 
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(trainable, config.train.max_grad_norm)
-        scaler.step(optimizer); scaler.update()
+        scaler.step(optimizer)
+        scaler.update()
         if ema is not None:
             ema.step(trainable, global_step)
         global_step += 1
         # Normal runs save periodically; the timing benchmark saves every measured update so
         # checkpoint-write cost remains inside the paper's full-flow wall-clock contract.
-        should_save = (
-            bench_on
-            or global_step % int(config.save_freq) == 0
-            or global_step == config.num_epochs
+        should_save = bench_on or global_step % int(config.save_freq) == 0 or global_step == config.num_epochs
+        root = (
+            save_ckpt(
+                config.save_dir,
+                transformer_ddp,
+                global_step,
+                rank,
+                ema,
+                trainable,
+                config,
+                optimizer,
+                scaler,
+                epoch_completed=epoch + 1,
+            )
+            if should_save
+            else None
         )
-        root = (save_ckpt(config.save_dir, transformer_ddp, global_step, rank, ema, trainable,
-                          config, optimizer, scaler, epoch_completed=epoch + 1)
-                if should_save else None)
         if bench and root is not None:
             bench.ckpt_ok = os.path.isdir(os.path.join(root, "lora"))
         if bench:
-            bench.update_end()   # AFTER save -> checkpoint-write cost is inside the measured wall-clock
+            bench.update_end()  # AFTER save -> checkpoint-write cost is inside the measured wall-clock
         if is_main_process(rank) and not bench_on:
             print(f"[{METHOD}] update {global_step} done", flush=True)
 

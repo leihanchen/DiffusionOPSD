@@ -1,0 +1,11 @@
+{
+  "num_frames": 121,
+  "guidance_scale": 5.0,
+  "fps": 8,
+  "seeds": [0, 1000],
+  "conditions": {
+    "control": {"height": 704, "width": 1280, "num_steps": 50},
+    "steps30": {"height": 704, "width": 1280, "num_steps": 30},
+    "resolution480": {"height": 480, "width": 832, "num_steps": 50}
+  }
+}

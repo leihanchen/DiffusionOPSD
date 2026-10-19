@@ -15,9 +15,7 @@ def calculate_prompt_group_dispersion(group_keys, rewards):
     if values.ndim == 0:
         values = values.reshape(1)
     if values.shape[0] != keys.shape[0]:
-        raise ValueError(
-            f"group/reward length mismatch: {keys.shape[0]} != {values.shape[0]}"
-        )
+        raise ValueError(f"group/reward length mismatch: {keys.shape[0]} != {values.shape[0]}")
     if values.ndim > 1:
         values = values.reshape(values.shape[0], -1)[:, 0]
     if keys.size == 0:
@@ -54,13 +52,14 @@ class PerPromptStatTracker:
             self.stats[prompt].extend(prompt_rewards)
             self.history_prompts.add(hash(prompt))  # Add hash of prompt to history_prompts
         for prompt in unique:
-            self.stats[prompt] = np.stack(self.stats[prompt])
+            # Keep history appendable when the same prompt returns in a later update.
+            prompt_history = np.stack(self.stats[prompt])
             prompt_rewards = rewards[prompts == prompt]  # Fix: Recalculate prompt_rewards for each prompt
-            mean = np.mean(self.stats[prompt], axis=0, keepdims=True)
+            mean = np.mean(prompt_history, axis=0, keepdims=True)
             if self.global_std:
                 std = np.std(rewards, axis=0, keepdims=True) + 1e-4  # Use global std of all rewards
             else:
-                std = np.std(self.stats[prompt], axis=0, keepdims=True) + 1e-4
+                std = np.std(prompt_history, axis=0, keepdims=True) + 1e-4
             advantages[prompts == prompt] = (prompt_rewards - mean) / std
         return advantages
 
