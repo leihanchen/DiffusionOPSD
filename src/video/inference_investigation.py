@@ -6,7 +6,9 @@ import csv
 import hashlib
 import json
 import math
+import os
 import random
+import resource
 import shutil
 import time
 from contextlib import contextmanager, nullcontext
@@ -227,6 +229,37 @@ def summarize(rows, conditions=tuple(CONDITIONS), checkpoint_comparisons=None):
     }
 
 
+def prompt_strata(rows, conditions, comparisons):
+    """Separate repeatedly monitored prompts from earlier screening and remaining prompts."""
+    result = {}
+    for name, start, stop in (("prompts_1_2", 0, 2), ("prompts_3_16", 2, 16), ("prompts_17_64", 16, 64)):
+        selected = [r for r in rows if start <= r["prompt_index"] < stop]
+        if selected:
+            result[name] = {
+                "num_prompts": len({r["prompt_index"] for r in selected}),
+                **summarize(selected, conditions, comparisons),
+            }
+    return result
+
+
+def verify_video(path, num_frames, width, height, fps):
+    """Decode the exported file so completeness does not rely on file size alone."""
+    import imageio_ffmpeg
+
+    reader = imageio_ffmpeg.read_frames(
+        str(path), input_params=["-threads", "1"], output_params=["-threads", "1", "-filter_threads", "1"]
+    )
+    try:
+        metadata = next(reader)
+        if tuple(metadata["size"]) != (width, height) or not math.isclose(metadata["fps"], fps, abs_tol=0.01):
+            raise ValueError(f"Unexpected video metadata for {path}: {metadata}")
+        count = sum(1 for _ in reader)
+        if count != num_frames:
+            raise ValueError(f"Expected {num_frames} frames in {path}, got {count}")
+    finally:
+        reader.close()
+
+
 def write_review(output, rows, seed=2026, conditions=tuple(CONDITIONS), checkpoint_comparisons=None):
     """Copy anonymously named media; keep the unblinding map outside the review folder."""
     review = output / "review"
@@ -276,6 +309,11 @@ def run_investigation(
     if checkpoint_states is not None:
         conditions = ("base", *checkpoint_states)
         comparisons = [(f"{label}-base", label, "base") for label in checkpoint_states]
+        if getattr(cfg, "compare_checkpoints", False):
+            labels = list(checkpoint_states)
+            comparisons += [
+                (f"{later}-{earlier}", later, earlier) for i, later in enumerate(labels) for earlier in labels[:i]
+            ]
     media = {}
     roll = WanRollout(pipe, cfg.num_steps, cfg.guidance_scale)
     devices = sorted({torch.device(x) for x in (cfg.policy_device, cfg.reward_device, cfg.vae_device)}, key=str)
@@ -337,7 +375,10 @@ def run_investigation(
                                 set_peft_model_state_dict(
                                     pipe.transformer, checkpoint_states[condition], adapter_name="default"
                                 )
-                            generation_condition = "A" if condition == "base" else "C"
+                            if cfg.sampler == "native":
+                                generation_condition = "B" if condition == "base" else "D"
+                            else:
+                                generation_condition = "A" if condition == "base" else "C"
                         latents, trace = generate_latents(
                             pipe, roll, cfg, generation_condition, initial, pe, ne, scheduler_factory
                         )
@@ -358,6 +399,8 @@ def run_investigation(
                         name = f"{pair_id}_{condition}"
                         video = f"{name}.mp4"
                         save_video(clip[0], output / video, cfg.fps)
+                        if getattr(cfg, "verify_videos", False):
+                            verify_video(output / video, cfg.num_frames, cfg.width, cfg.height, cfg.fps)
                         for label, frame in [
                             ("first", 0),
                             ("middle", cfg.num_frames // 2),
@@ -372,6 +415,14 @@ def run_investigation(
                             "prompt": prompt,
                             "seed": seed,
                             "video": video,
+                            "sampler": trace["sampler"],
+                            "num_frames": cfg.num_frames,
+                            "num_steps": cfg.num_steps,
+                            "width": cfg.width,
+                            "height": cfg.height,
+                            "fps": cfg.fps,
+                            "video_verified": getattr(cfg, "verify_videos", False),
+                            "host_peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
                             **hashes,
                             **scores,
                             "compute_seconds": compute_seconds,
@@ -383,6 +434,8 @@ def run_investigation(
                         write_json(output / f"{name}.json", {**row, "trace": trace})
                         with (output / "samples.jsonl").open("a") as f:
                             f.write(json.dumps(row, allow_nan=False) + "\n")
+                            f.flush()
+                            os.fsync(f.fileno())
                         with (output / "samples.csv").open("a", newline="") as f:
                             writer = csv.DictWriter(f, fieldnames=list(row))
                             if not rows:
@@ -400,7 +453,11 @@ def run_investigation(
                                 {
                                     "sample_index": len(rows),
                                     "condition": condition,
-                                    **{f"investigation/{condition}/{k}": v for k, v in scores.items()},
+                                    **(
+                                        {}
+                                        if getattr(cfg, "table_logging", False)
+                                        else {f"investigation/{condition}/{k}": v for k, v in scores.items()}
+                                    ),
                                     "investigation/compute_seconds": compute_seconds,
                                     **{f"investigation/{k}": v for k, v in row.items() if "peak_" in k},
                                     "investigation/video": video_media,
@@ -411,8 +468,10 @@ def run_investigation(
                         print(json.dumps({"event": "condition_complete", "completed": len(rows), **row}), flush=True)
                         del latents, clip, geometry, quality
         summary = summarize(rows, conditions, comparisons)
+        if getattr(cfg, "report_prompt_strata", False):
+            summary["prompt_strata"] = prompt_strata(rows, conditions, comparisons)
         if wandb_run is not None:
-            for category in ("means", "differences", "training"):
+            for category in () if getattr(cfg, "table_logging", False) else ("means", "differences", "training"):
                 for name, metrics in summary[category].items():
                     for metric, value in metrics.items():
                         wandb_run.summary[f"investigation/{category}/{name}/{metric}"] = value
@@ -422,8 +481,8 @@ def run_investigation(
                     "prompt",
                     "seed",
                     "comparison",
-                    "base_video",
-                    "trained_video",
+                    "reference_video" if getattr(cfg, "table_logging", False) else "base_video",
+                    "candidate_video" if getattr(cfg, "table_logging", False) else "trained_video",
                     *[f"delta/{k}" for k in SCORES],
                     "p_q",
                     "geometry_up",
@@ -450,7 +509,56 @@ def run_investigation(
                             for k in ("p_q", "geometry_up", "identity_ok", "quality_ok", "not_frozen", "all_pass")
                         ],
                     )
-            wandb_run.log({"investigation/pairs": table}, step=len(rows) + 1, commit=True)
+            tables = {"investigation/pairs": table}
+            if getattr(cfg, "table_logging", False):
+                columns = [
+                    "prompt_index",
+                    "prompt",
+                    "seed",
+                    "condition",
+                    "sampler",
+                    "num_frames",
+                    "num_steps",
+                    "width",
+                    "height",
+                    "fps",
+                    *SCORES,
+                    "compute_seconds",
+                    "duration_seconds",
+                ]
+                tables["investigation/samples"] = wandb.Table(
+                    columns=columns, data=[[row[k] for k in columns] for row in rows]
+                )
+                checks = ["p_q", "geometry_up", "identity_ok", "quality_ok", "not_frozen", "all_pass"]
+                tables["investigation/aggregates"] = wandb.Table(
+                    columns=["kind", "condition_or_comparison", *SCORES, *checks],
+                    data=[
+                        ["absolute", name, *[metrics[k] for k in SCORES], *[None] * len(checks)]
+                        for name, metrics in summary["means"].items()
+                    ]
+                    + [
+                        ["delta", name, *[metrics[k] for k in SCORES], *[summary["training"][name][k] for k in checks]]
+                        for name, metrics in summary["differences"].items()
+                        if name in summary["training"]
+                    ],
+                )
+                if "prompt_strata" in summary:
+                    tables["investigation/prompt_strata"] = wandb.Table(
+                        columns=["stratum", "num_prompts", "comparison", *[f"delta/{k}" for k in SCORES], *checks],
+                        data=[
+                            [
+                                group,
+                                result["num_prompts"],
+                                name,
+                                *[metrics[k] for k in SCORES],
+                                *[result["training"][name][k] for k in checks],
+                            ]
+                            for group, result in summary["prompt_strata"].items()
+                            for name, metrics in result["differences"].items()
+                            if name in result["training"]
+                        ],
+                    )
+            wandb_run.log(tables, step=len(rows) + 1, commit=True)
             wandb_run.summary["investigation/num_videos"] = len(rows)
             wandb_run.summary["investigation/num_pairs"] = len(summary["pairs"])
             wandb_run.summary["investigation/num_comparisons"] = sum(len(pair["training"]) for pair in summary["pairs"])

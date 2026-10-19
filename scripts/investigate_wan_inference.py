@@ -32,6 +32,17 @@ def parse_args(argv=None):
     inputs.add_argument("--checkpoint-manifest", type=Path)
     p.add_argument("--min-gpu-memory-gib", type=float, default=0)
     p.add_argument(
+        "--compare-checkpoints", action="store_true", help="Also compare each later checkpoint to earlier ones"
+    )
+    p.add_argument(
+        "--table-logging", action="store_true", help="Keep scores in W&B tables instead of repeated scalar keys"
+    )
+    p.add_argument("--report-prompt-strata", action="store_true")
+    p.add_argument(
+        "--verify-videos", action="store_true", help="Decode exports and check frame count, resolution and FPS"
+    )
+    p.add_argument("--expected-flow-shift", type=float)
+    p.add_argument(
         "--checkpoint-format",
         choices=("adapter", "training"),
         default="adapter",
@@ -87,8 +98,10 @@ def parse_args(argv=None):
         p.error("Seed offsets must be distinct and nonnegative")
     if max(a.seed_offsets) + a.num_prompts - 1 >= 2**63:
         p.error("Seeds must fit in a signed 64-bit integer")
-    if a.checkpoint_manifest and a.sampler != "euler":
-        p.error("Checkpoint comparisons currently require --sampler euler")
+    if a.checkpoint_manifest and a.sampler == "both":
+        p.error("Checkpoint comparisons require one sampler: euler or native")
+    if a.compare_checkpoints and not a.checkpoint_manifest:
+        p.error("--compare-checkpoints requires --checkpoint-manifest")
     for path in (a.policy or a.checkpoint_manifest, a.prompts, Path(a.model) / "model_index.json"):
         if not path.is_file():
             p.error(f"Required local file missing: {path}")
@@ -138,6 +151,7 @@ def main(argv=None):
                 raise ValueError(f"GPU capacity {capacity:.1f} GiB below requested minimum")
         manifest = {
             "arguments": vars(cfg),
+            "negative_prompt": "",
             "prompts": prompts,
             "seeds": [[i + offset for offset in cfg.seed_offsets] for i in range(len(prompts))],
             "checkpoint_sha256": file_hash(cfg.policy or cfg.checkpoint_manifest),
@@ -180,7 +194,7 @@ def main(argv=None):
         run = wandb.init(
             project=os.environ.get("WANDB_PROJECT", "diffusionopsd"),
             entity=os.environ.get("WANDB_ENTITY"),
-            name=f"wan22-inference-{os.environ.get('SLURM_JOB_ID', output.name)}",
+            name=os.environ.get("WANDB_RUN_NAME", f"wan22-inference-{os.environ.get('SLURM_JOB_ID', output.name)}"),
             dir=str(output),
             mode="offline",
             config={k: str(v) if isinstance(v, Path) else v for k, v in vars(cfg).items()},
@@ -195,6 +209,10 @@ def main(argv=None):
         if not isinstance(pipe.scheduler, UniPCMultistepScheduler):
             raise ValueError("Expected the checkpoint's UniPC scheduler")
         scheduler_config = dict(pipe.scheduler.config)
+        if cfg.expected_flow_shift is not None and scheduler_config.get("flow_shift") != cfg.expected_flow_shift:
+            raise ValueError(f"Expected flow shift {cfg.expected_flow_shift}, got {scheduler_config.get('flow_shift')}")
+        manifest["scheduler"] = scheduler_config
+        write_json(output / "manifest.json", manifest)
         policy = attach_lora(pipe.transformer, None)
         validate_adapter(get_peft_model_state_dict(policy, adapter_name="default"), state)
         for candidate in (checkpoint_states or {"single": state}).values():
@@ -212,7 +230,7 @@ def main(argv=None):
             .requires_grad_(False)
         )
         judge = load_video_reward(cfg.reward_device, num_frames=8)
-        run_investigation(
+        summary = run_investigation(
             pipe,
             reward,
             judge,
@@ -224,6 +242,13 @@ def main(argv=None):
             checkpoint_states=checkpoint_states,
         )
         manifest = json.loads((output / "manifest.json").read_text())
+        if summary["num_videos"] != manifest["expected_videos"]:
+            raise ValueError("Completed video count differs from the manifest")
+        if len(summary["pairs"]) != len(prompts) * len(cfg.seed_offsets):
+            raise ValueError("Completed matched prompt/seed count differs from the manifest")
+        manifest["completed_videos"] = summary["num_videos"]
+        manifest["completed_comparisons"] = sum(len(pair["training"]) for pair in summary["pairs"])
+        manifest["videos_verified"] = cfg.verify_videos
         manifest["status"] = "complete"
         write_json(output / "manifest.json", manifest)
         for name in ("manifest.json", "summary.json", "samples.jsonl", "samples.csv"):

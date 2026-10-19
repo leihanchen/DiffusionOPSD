@@ -414,3 +414,78 @@ def test_three_model_run_shares_inputs_and_replaces_adapter(tmp_path, monkeypatc
         assert all(torch.equal(base[j], five[j]) and torch.equal(base[j], seven[j]) for j in range(3))
     with (out / "review/preferences.csv").open() as stream:
         assert len(list(csv.DictReader(stream))) == 4
+
+
+def test_native_three_model_tables_and_video_verification(tmp_path, monkeypatch):
+    import imageio.v2 as imageio
+    import peft
+    import wandb
+
+    pipe, cfg, out = setup(tmp_path, monkeypatch)
+    cfg.sampler = "native"
+    cfg.seed_offsets = [0]
+    cfg.compare_checkpoints = True
+    cfg.table_logging = True
+    cfg.report_prompt_strata = True
+    cfg.verify_videos = True
+    cfg.fps = 24
+    loaded = []
+
+    def replace(policy, state, adapter_name):
+        loaded.append(state["weight"].item())
+        policy.weight.data.fill_(state["weight"].item())
+
+    monkeypatch.setattr(peft, "set_peft_model_state_dict", replace)
+    run = wandb.init(project="diffusionopsd-test", mode="offline", dir=str(out))
+    try:
+        summary = inv.run_investigation(
+            pipe,
+            Reward(),
+            Judge(),
+            cfg,
+            ["first", "second"],
+            out,
+            Scheduler,
+            run,
+            checkpoint_states={"step7": {"weight": torch.tensor(0.07)}, "step50": {"weight": torch.tensor(0.5)}},
+        )
+        assert run.summary["investigation/num_comparisons"] == 6
+        assert not any(k.startswith("investigation/means/") for k in run.summary._as_dict())
+    finally:
+        run.finish()
+    assert loaded == [0.07, 0.5, 0.07, 0.5] or loaded == pytest.approx([0.07, 0.5, 0.07, 0.5])
+    assert summary["num_videos"] == 6
+    assert "step50-step7" in summary["differences"]
+    for start in (0, 3):
+        group = pipe.calls[start : start + 3]
+        assert [(x[3], x[4]) for x in group] == [(True, True), (False, True), (False, True)]
+        assert all(torch.equal(x[j], group[0][j]) for x in group for j in range(3))
+    rows = [json.loads(line) for line in (out / "samples.jsonl").read_text().splitlines()]
+    assert all(r["video_verified"] and r["fps"] == 24 for r in rows)
+    with imageio.get_reader(str(out / rows[0]["video"])) as reader:
+        assert reader.get_meta_data()["fps"] == 24
+        assert reader.count_frames() == 5
+    table_paths = list((out / "wandb").glob("offline-run-*/files/media/table/**/*.table.json"))
+    assert len(table_paths) == 4
+    pair_table = next(json.loads(p.read_text()) for p in table_paths if "pairs_" in p.name)
+    assert len(pair_table["data"]) == 6
+    assert "reference_video" in pair_table["columns"]
+    with pytest.raises(ValueError, match="frames"):
+        inv.verify_video(out / rows[0]["video"], 6, 32, 32, 24)
+    with pytest.raises(ValueError, match="metadata"):
+        inv.verify_video(out / rows[0]["video"], 5, 32, 32, 8)
+
+
+def test_full_prompt_strata_equal_weighting():
+    rows = [
+        dict(condition=c, prompt_index=i, seed=i, **{k: float(i) for k in inv.SCORES})
+        for i in range(64)
+        for c in ("base", "step7", "step50")
+    ]
+    summary = inv.prompt_strata(
+        rows,
+        ("base", "step7", "step50"),
+        [("step7-base", "step7", "base"), ("step50-base", "step50", "base"), ("step50-step7", "step50", "step7")],
+    )
+    assert [s["num_prompts"] for s in summary.values()] == [2, 14, 48]
+    assert summary["prompts_17_64"]["means"]["base"]["geo"] == 39.5

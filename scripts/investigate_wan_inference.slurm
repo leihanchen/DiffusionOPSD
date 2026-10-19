@@ -34,6 +34,14 @@ if [[ -n "${CHECKPOINT_MANIFEST:-}" ]]; then
   POLICY_ARGS=(--checkpoint-manifest "$CHECKPOINT_MANIFEST")
   POLICY_PATH="$CHECKPOINT_MANIFEST"
 fi
+MONITOR_ARGS=(--fps "${FPS:-8}")
+[[ "${COMPARE_CHECKPOINTS:-0}" == 1 ]] && MONITOR_ARGS+=(--compare-checkpoints)
+[[ "${TABLE_LOGGING:-0}" == 1 ]] && MONITOR_ARGS+=(--table-logging)
+[[ "${REPORT_PROMPT_STRATA:-0}" == 1 ]] && MONITOR_ARGS+=(--report-prompt-strata)
+[[ "${VERIFY_VIDEOS:-0}" == 1 ]] && MONITOR_ARGS+=(--verify-videos)
+if [[ -n "${EXPECTED_FLOW_SHIFT:-}" ]]; then
+  MONITOR_ARGS+=(--expected-flow-shift "$EXPECTED_FLOW_SHIFT")
+fi
 CHECKPOINT_ARGS=(--checkpoint-format "$CHECKPOINT_FORMAT")
 if [[ -n "${EXPECTED_UPDATE:-}" ]]; then
   CHECKPOINT_ARGS+=(--expected-update "$EXPECTED_UPDATE")
@@ -70,7 +78,7 @@ apptainer exec --nv --bind "$REPO" --bind "$SCRATCH" \
   --env PYTHONNOUSERSITE=1 --env WANDB_MODE=offline \
   --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 --env HF_DATASETS_OFFLINE=1 \
   "$SIF" python scripts/investigate_wan_inference.py \
-    --config "$CONFIG_PATH" --sampler "$SAMPLER" "${CHECKPOINT_ARGS[@]}" \
+    --config "$CONFIG_PATH" --sampler "$SAMPLER" "${CHECKPOINT_ARGS[@]}" "${MONITOR_ARGS[@]}" \
     "${POLICY_ARGS[@]}" --output-dir "$OUTPUT" --num-prompts "$NUM_PROMPTS" \
     --seed-offsets "${SEED_OFFSET_ARGS[@]}" \
     --policy-device "${POLICY_DEVICE:-cuda:0}" --reward-device "${REWARD_DEVICE:-cuda:1}" \
