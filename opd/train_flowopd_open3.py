@@ -14,6 +14,7 @@ stored SDE transitions -> accumulate), which keeps memory bounded vs storing a w
 Run:  torchrun --standalone --nproc_per_node=8 opd/train_flowopd_open3.py
 Env same as the other OPD trainers.
 """
+
 import os
 import sys
 import json
@@ -23,10 +24,20 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from opd_common import (  # noqa: E402
-    setup_distributed, cleanup_distributed, is_main_process,
-    TextPromptDataset, DistributedKRepeatSampler, compute_text_embeddings,
-    build_models, rollout, student_velocity, teacher_velocities, save_ckpt,
-    maybe_resume, BenchmarkTimer, global_stepwise_advantage,
+    setup_distributed,
+    cleanup_distributed,
+    is_main_process,
+    TextPromptDataset,
+    DistributedKRepeatSampler,
+    compute_text_embeddings,
+    build_models,
+    rollout,
+    student_velocity,
+    teacher_velocities,
+    save_ckpt,
+    maybe_resume,
+    BenchmarkTimer,
+    global_stepwise_advantage,
 )
 from configs.opd_config import get_config  # noqa: E402
 from diffusionopsd.diffusers_patch.solver import flow_grpo_step  # SDE transition log-prob recompute  # noqa: E402
@@ -34,8 +45,7 @@ from diffusionopsd.diffusers_patch.solver import flow_grpo_step  # SDE transitio
 METHOD = "flowopd"
 
 
-def teacher_stepwise_logprob_reward(transformer_ddp, teacher_names, traj_latents, sigmas,
-                                    embeds, pooled, num_tt, eta):
+def teacher_stepwise_logprob_reward(transformer_ddp, teacher_names, traj_latents, sigmas, embeds, pooled, num_tt, eta):
     """STEP-WISE teacher-KL reward. For EACH SDE transition j independently, the reward
     is the mean over teachers of the teacher's log-prob of the student's ACTUAL sampled next state
     z_{j+1} under the teacher's transition N(prev_sample_mean_teacher_j, sigma_j^2) — computed with the
@@ -51,15 +61,17 @@ def teacher_stepwise_logprob_reward(transformer_ddp, teacher_names, traj_latents
             v_ts = teacher_velocities(transformer_ddp, teacher_names, z_t, float(sigmas[j]), embeds, pooled)
             acc = torch.zeros(B, device=z_t.device)
             for v_t in v_ts:
-                _, _, logp_t = flow_grpo_step(model_output=v_t.float(), latents=z_t, eta=eta,
-                                              sigmas=sigmas, index=j, prev_sample=z_next)
+                _, _, logp_t = flow_grpo_step(
+                    model_output=v_t.float(), latents=z_t, eta=eta, sigmas=sigmas, index=j, prev_sample=z_next
+                )
                 acc += logp_t
             r[:, j] = acc / max(len(v_ts), 1)
     return r
 
 
 def main():
-    rank = int(os.environ["RANK"]); world_size = int(os.environ["WORLD_SIZE"])
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ["LOCAL_RANK"])
     setup_distributed(rank, local_rank, world_size)
     device = torch.device(f"cuda:{local_rank}")
@@ -74,8 +86,11 @@ def main():
     run_done_path = os.path.join(config.save_dir, "run_done.json")
     if os.path.exists(run_done_path) and not bench_on:
         if is_main_process(rank):
-            print(f"[{METHOD}] run_done.json exists — already complete at {config.save_dir}; nothing to do.", flush=True)
-        cleanup_distributed(); return
+            print(
+                f"[{METHOD}] run_done.json exists — already complete at {config.save_dir}; nothing to do.", flush=True
+            )
+        cleanup_distributed()
+        return
     ck_root = os.path.join(config.save_dir, "checkpoints")
     if not bench_on and os.path.isdir(ck_root):
         cks = sorted([int(d.split("-")[-1]) for d in os.listdir(ck_root) if d.startswith("checkpoint-")])
@@ -84,31 +99,47 @@ def main():
     if not config.opd.teacher_loras:
         raise ValueError("OPD_TEACHER_LORAS must give 3 teacher LoRA dirs; see opd/README.md.")
     if is_main_process(rank):
-        os.makedirs(config.save_dir, exist_ok=True); os.makedirs(config.logdir, exist_ok=True)
+        os.makedirs(config.save_dir, exist_ok=True)
+        os.makedirs(config.logdir, exist_ok=True)
         print(f"[{METHOD}] teachers={config.opd.teacher_loras} save_dir={config.save_dir} bench={bench_on}", flush=True)
 
-    (pipeline, transformer_ddp, teacher_names, text_encoders, tokenizers,
-     optimizer, ema, scaler, trainable, mp_dtype) = build_models(config, device, rank, local_rank)
+    (
+        pipeline,
+        transformer_ddp,
+        teacher_names,
+        text_encoders,
+        tokenizers,
+        optimizer,
+        ema,
+        scaler,
+        trainable,
+        mp_dtype,
+    ) = build_models(config, device, rank, local_rank)
     enable_amp = mp_dtype is not None
 
     train_dataset = TextPromptDataset(config.dataset, "train")
-    sampler = DistributedKRepeatSampler(train_dataset, config.sample.train_batch_size,
-                                        config.sample.num_image_per_prompt, world_size, rank, seed=0)
-    loader = DataLoader(train_dataset, batch_sampler=sampler, num_workers=0,
-                        collate_fn=train_dataset.collate_fn, pin_memory=True)
+    sampler = DistributedKRepeatSampler(
+        train_dataset, config.sample.train_batch_size, config.sample.num_image_per_prompt, world_size, rank, seed=0
+    )
+    loader = DataLoader(
+        train_dataset, batch_sampler=sampler, num_workers=0, collate_fn=train_dataset.collate_fn, pin_memory=True
+    )
     train_iter = iter(loader)
     neg_embed, neg_pooled = compute_text_embeddings([""], text_encoders, tokenizers, 128, device)
     neg_embed = neg_embed.repeat(config.sample.train_batch_size, 1, 1)
     neg_pooled = neg_pooled.repeat(config.sample.train_batch_size, 1)
-    first_epoch, global_step = maybe_resume(config, transformer_ddp, optimizer, scaler, ema,
-                                            device, enable_amp, world_size)
+    first_epoch, global_step = maybe_resume(
+        config, transformer_ddp, optimizer, scaler, ema, device, enable_amp, world_size
+    )
 
-    warmup = int(os.environ.get("BENCH_WARMUP", "2")); measured = int(os.environ.get("BENCH_MEASURED", "6"))
+    warmup = int(os.environ.get("BENCH_WARMUP", "2"))
+    measured = int(os.environ.get("BENCH_MEASURED", "6"))
     bench = BenchmarkTimer(config, world_size, warmup, measured) if bench_on else None
     n_updates = (warmup + measured) if bench_on else config.num_epochs
     grad_accum = config.train.gradient_accumulation_steps
-    num_tt = int(config.sample.num_steps * config.train.timestep_fraction)   # SDE transitions trained on
-    clip_range = float(config.opd.clip_range); eta = float(config.sample.noise_level)
+    num_tt = int(config.sample.num_steps * config.train.timestep_fraction)  # SDE transitions trained on
+    clip_range = float(config.opd.clip_range)
+    eta = float(config.sample.noise_level)
 
     for epoch in range(first_epoch, n_updates):
         optimizer.zero_grad(set_to_none=True)
@@ -119,8 +150,16 @@ def main():
             prompts, _ = next(train_iter)
             embeds, pooled = compute_text_embeddings(prompts, text_encoders, tokenizers, 128, device)
             _, traj_latents, sigmas, traj_logprobs = rollout(
-                config, pipeline, transformer_ddp, embeds, pooled, neg_embed[:len(prompts)],
-                neg_pooled[:len(prompts)], device, mp_dtype)
+                config,
+                pipeline,
+                transformer_ddp,
+                embeds,
+                pooled,
+                neg_embed[: len(prompts)],
+                neg_pooled[: len(prompts)],
+                device,
+                mp_dtype,
+            )
             if traj_logprobs is None:
                 raise RuntimeError("FlowOPD needs the SDE flow rollout (per-step log-probs); got None.")
 
@@ -129,7 +168,8 @@ def main():
             # transformer's float32 conv bias (as the inline velocity calls do).
             with torch.cuda.amp.autocast(enabled=enable_amp, dtype=mp_dtype):
                 reward = teacher_stepwise_logprob_reward(
-                    transformer_ddp, teacher_names, traj_latents, sigmas, embeds, pooled, num_tt, eta)
+                    transformer_ddp, teacher_names, traj_latents, sigmas, embeds, pooled, num_tt, eta
+                )
             if bench:
                 bench.add_teacher_fwd(num_tt * len(teacher_names))
             # PER-STEP advantage, normalized over the GLOBAL batch (all GPUs, ~world_size*B samples) —
@@ -138,14 +178,16 @@ def main():
 
             # PPO clip over the stored SDE transitions, each step j with ITS OWN advantage adv[:, j].
             for j in range(num_tt):
-                z_t = traj_latents[:, j].float(); z_next = traj_latents[:, j + 1].float()
-                logp_old = traj_logprobs[:, j].float(); sigma_j = sigmas[j]
+                z_t = traj_latents[:, j].float()
+                z_next = traj_latents[:, j + 1].float()
+                logp_old = traj_logprobs[:, j].float()
+                sigma_j = sigmas[j]
                 a_j = adv[:, j]
                 with torch.cuda.amp.autocast(enabled=enable_amp, dtype=mp_dtype):
                     v_theta = student_velocity(transformer_ddp, z_t, sigma_j, embeds, pooled)
                 _znext, _x0, logp_new = flow_grpo_step(
-                    model_output=v_theta.float(), latents=z_t, eta=eta,
-                    sigmas=sigmas, index=j, prev_sample=z_next)
+                    model_output=v_theta.float(), latents=z_t, eta=eta, sigmas=sigmas, index=j, prev_sample=z_next
+                )
                 ratio = torch.exp(logp_new - logp_old)
                 unclipped = -a_j * ratio
                 clipped = -a_j * torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
@@ -154,26 +196,39 @@ def main():
 
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(trainable, config.train.max_grad_norm)
-        scaler.step(optimizer); scaler.update()
+        scaler.step(optimizer)
+        scaler.update()
         if ema is not None:
             ema.step(trainable, global_step)
         global_step += 1
         # Normal runs save periodically; the timing benchmark saves every measured update so
         # checkpoint-write cost remains inside the paper's full-flow wall-clock contract.
-        should_save = (
-            bench_on
-            or global_step % int(config.save_freq) == 0
-            or global_step == config.num_epochs
+        should_save = bench_on or global_step % int(config.save_freq) == 0 or global_step == config.num_epochs
+        root = (
+            save_ckpt(
+                config.save_dir,
+                transformer_ddp,
+                global_step,
+                rank,
+                ema,
+                trainable,
+                config,
+                optimizer,
+                scaler,
+                epoch_completed=epoch + 1,
+            )
+            if should_save
+            else None
         )
-        root = (save_ckpt(config.save_dir, transformer_ddp, global_step, rank, ema, trainable,
-                          config, optimizer, scaler, epoch_completed=epoch + 1)
-                if should_save else None)
         if bench and root is not None:
             bench.ckpt_ok = os.path.isdir(os.path.join(root, "lora"))
         if bench:
-            bench.update_end()   # AFTER save -> checkpoint-write cost inside measured wall-clock
+            bench.update_end()  # AFTER save -> checkpoint-write cost inside measured wall-clock
         if is_main_process(rank) and not bench_on:
-            print(f"[{METHOD}] update {global_step} done (mean step teacher-logprob reward={float(reward.mean()):.4f})", flush=True)
+            print(
+                f"[{METHOD}] update {global_step} done (mean step teacher-logprob reward={float(reward.mean()):.4f})",
+                flush=True,
+            )
 
     if bench:
         out = os.path.join(config.save_dir, f"benchmark_{METHOD}.json")
