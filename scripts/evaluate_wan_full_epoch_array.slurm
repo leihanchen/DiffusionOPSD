@@ -8,7 +8,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=128G
-#SBATCH --gpus-per-node=h100:2
+#SBATCH --gpus-per-node=h100:1
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/%x-%A_%a.out
 #SBATCH --error=logs/%x-%A_%a.err
@@ -19,6 +19,7 @@ task="${SLURM_ARRAY_TASK_ID:?Requires a Slurm array}"
 root="${WAN_EVAL_ARRAY_ROOT:-$PWD/logs/wan22-full-epoch-array-${SLURM_ARRAY_JOB_ID:?}}"
 mkdir -p "$root"
 export PROMPT_START=$((task * 8)) NUM_PROMPTS=8
+export POLICY_DEVICE=cuda:0 VAE_DEVICE=cuda:0 REWARD_DEVICE=cuda:0
 export INFERENCE_OUTPUT_DIR="$root/task_$task"
 export WANDB_RUN_GROUP="job-${SLURM_ARRAY_JOB_ID}-base-step7-step50-eval-killarney"
 export WANDB_RUN_NAME="job-${SLURM_ARRAY_JOB_ID}_${task}-base-step7-step50-prompts-${PROMPT_START}-killarney"

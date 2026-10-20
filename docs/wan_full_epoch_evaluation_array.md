@@ -13,8 +13,13 @@ task 7 covers 56–63. Seeds equal the original zero-based prompt index.
 Each task compares base, step 7 and step 50 with identical paired inputs.
 The original Wan2.2 inference preset and training configuration are preserved.
 
-Each task requests two H100s, four CPU cores, 128 GiB RAM and two hours in
-`gpubase_h100_b1`. The array limits concurrency to two tasks (four GPUs total).
+Each task requests one 80 GiB H100, four CPU cores, 128 GiB RAM and two hours in
+`gpubase_h100_b1`. Policy, text encoder, VAE and scorers share `cuda:0` and run
+sequentially without gradients. The array limits concurrency to two tasks
+(two GPUs total). The original non-array entry point still defaults to two GPUs.
+Recorded 121-frame runs peaked at approximately 32 GiB for generation and
+15 GiB for scorers on separate GPUs; this supports trying colocation on 80 GiB,
+but does not constitute a measured single-GPU peak for this workload.
 Each task generates 24 videos, approximately 72 minutes of generation at the
 previous measured rate, plus loading, scoring, export and logging overhead.
 The two-hour budget is an estimate; scheduling and runtime are not guaranteed.

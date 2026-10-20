@@ -132,7 +132,7 @@ def test_array_resources_and_ranges():
         "--array=0-7%2",
         "--time=02:00:00",
         "--partition=gpubase_h100_b1",
-        "--gpus-per-node=h100:2",
+        "--gpus-per-node=h100:1",
         "--cpus-per-task=4",
         "--mem=128G",
         "task * 8",
@@ -140,6 +140,25 @@ def test_array_resources_and_ranges():
     ):
         assert value in text
     assert "--if-ready --wandb" in text
+    assert "POLICY_DEVICE=cuda:0 VAE_DEVICE=cuda:0 REWARD_DEVICE=cuda:0" in text
+    assert 'REWARD_DEVICE="${REWARD_DEVICE:-cuda:1}"' in Path("scripts/evaluate_wan_full_epoch.slurm").read_text()
+
+
+@pytest.mark.parametrize("gpus,override,expected", [(1, None, "cuda:0"), (2, None, "cuda:1"), (2, "cuda:0", "cuda:0")])
+def test_shared_scorer_device_from_allocation(gpus, override, expected):
+    import os
+    import subprocess
+
+    script = (
+        Path("scripts/evaluate_wan_full_epoch.slurm")
+        .read_text()
+        .replace("exec bash scripts/investigate_wan_inference.slurm", 'printf "%s\\n" "$REWARD_DEVICE"')
+    )
+    env = {**os.environ, "SLURM_SUBMIT_DIR": str(Path.cwd()), "SLURM_JOB_ID": "test", "SLURM_GPUS_ON_NODE": str(gpus)}
+    env.pop("REWARD_DEVICE", None)
+    if override is not None:
+        env["REWARD_DEVICE"] = override
+    assert subprocess.check_output(["bash", "-c", script], env=env, text=True).strip() == expected
 
 
 def test_combined_offline_wandb_media_and_tables(shards, monkeypatch):
