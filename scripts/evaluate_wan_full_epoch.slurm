@@ -17,10 +17,10 @@ export CHECKPOINT_MANIFEST=config/wan22_full_epoch_evaluation_checkpoints.json
 export CONFIG_PATH=config/wan22_inference_debug.json
 unset EXPECTED_UPDATE
 export CHECKPOINT_FORMAT=training
-export SAMPLER=native NUM_PROMPTS=64 SEED_OFFSETS=0 FPS=24
+export SAMPLER=native NUM_PROMPTS="${NUM_PROMPTS:-64}" SEED_OFFSETS=0 FPS=24
 export COMPARE_CHECKPOINTS=1 TABLE_LOGGING=1 REPORT_PROMPT_STRATA=1 VERIFY_VIDEOS=1
 export EXPECTED_FLOW_SHIFT=5 MIN_GPU_MEMORY_GIB=79
 export POLICY_DEVICE=cuda:0 VAE_DEVICE=cuda:0 REWARD_DEVICE=cuda:1
 export WANDB_ENTITY=cvis_tmu WANDB_PROJECT=diffusionopsd WANDB_MODE=offline
-export WANDB_RUN_NAME="job-${SLURM_JOB_ID}-base-step7-step50-64prompt-eval-killarney"
+export WANDB_RUN_NAME="${WANDB_RUN_NAME:-job-${SLURM_JOB_ID}-base-step7-step50-64prompt-eval-killarney}"
 exec bash scripts/investigate_wan_inference.slurm

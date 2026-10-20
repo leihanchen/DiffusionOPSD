@@ -423,6 +423,7 @@ def test_native_three_model_tables_and_video_verification(tmp_path, monkeypatch)
 
     pipe, cfg, out = setup(tmp_path, monkeypatch)
     cfg.sampler = "native"
+    cfg.prompt_start = 24
     cfg.seed_offsets = [0]
     cfg.compare_checkpoints = True
     cfg.table_logging = True
@@ -461,6 +462,7 @@ def test_native_three_model_tables_and_video_verification(tmp_path, monkeypatch)
         assert [(x[3], x[4]) for x in group] == [(True, True), (False, True), (False, True)]
         assert all(torch.equal(x[j], group[0][j]) for x in group for j in range(3))
     rows = [json.loads(line) for line in (out / "samples.jsonl").read_text().splitlines()]
+    assert {(r["prompt_index"], r["seed"], r["prompt"]) for r in rows} == {(24, 24, "first"), (25, 25, "second")}
     assert all(r["video_verified"] and r["fps"] == 24 for r in rows)
     with imageio.get_reader(str(out / rows[0]["video"])) as reader:
         assert reader.get_meta_data()["fps"] == 24

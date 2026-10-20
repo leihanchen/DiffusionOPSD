@@ -326,7 +326,7 @@ def run_investigation(
     current = {"phase": "initialization"}
     try:
         with torch.no_grad():
-            for index, prompt in enumerate(prompts):
+            for index, prompt in enumerate(prompts, start=getattr(cfg, "prompt_start", 0)):
                 current = {"phase": "prompt_encoding", "prompt_index": index}
                 pe, ne = pipe.encode_prompt(
                     prompt, negative_prompt="", do_classifier_free_guidance=True, device=cfg.policy_device
@@ -498,7 +498,7 @@ def run_investigation(
                     trained, base = name.split("-")
                     table.add_data(
                         index,
-                        prompts[index],
+                        prompts[index - getattr(cfg, "prompt_start", 0)],
                         seed,
                         name,
                         media[index, seed, base],
