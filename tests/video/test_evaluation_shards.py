@@ -117,6 +117,25 @@ def test_incomplete_or_mismatched_manifests(shards):
         collect_shards(shards)
 
 
+def test_scheduler_default_metadata_order_is_irrelevant(shards):
+    for task in range(8):
+        path = shards / f"task_{task}/manifest.json"
+        manifest = json.loads(path.read_text())
+        keys = ["sigma_min", "sigma_max"]
+        manifest["scheduler"]["_use_default_values"] = keys if task % 2 else keys[::-1]
+        path.write_text(json.dumps(manifest))
+    assert len(collect_shards(shards)[0]) == 192
+
+
+def test_actual_scheduler_mismatch_is_rejected(shards):
+    path = shards / "task_1/manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["scheduler"]["flow_shift"] = 3
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="mismatched scheduler"):
+        collect_shards(shards)
+
+
 def test_combined_exports_and_idempotent_finalization(shards):
     output = aggregate(shards)
     assert len(list(output.glob("*.mp4"))) == 192
@@ -130,17 +149,16 @@ def test_array_resources_and_ranges():
     text = Path("scripts/evaluate_wan_full_epoch_array.slurm").read_text()
     for value in (
         "--array=0-7%2",
-        "--time=02:00:00",
-        "--partition=gpubase_h100_b1",
-        "--gpus-per-node=h100:1",
-        "--cpus-per-task=4",
+        "--time=04:00:00",
+        "--gpus-per-node=a100:2",
+        "--cpus-per-task=8",
         "--mem=128G",
         "task * 8",
         "NUM_PROMPTS=8",
     ):
         assert value in text
     assert "--if-ready --wandb" in text
-    assert "POLICY_DEVICE=cuda:0 VAE_DEVICE=cuda:0 REWARD_DEVICE=cuda:0" in text
+    assert "POLICY_DEVICE=cuda:0 VAE_DEVICE=cuda:0 REWARD_DEVICE=cuda:1" in text
     assert 'REWARD_DEVICE="${REWARD_DEVICE:-cuda:1}"' in Path("scripts/evaluate_wan_full_epoch.slurm").read_text()
 
 

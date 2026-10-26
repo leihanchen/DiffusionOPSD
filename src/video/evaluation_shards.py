@@ -13,6 +13,14 @@ CONDITIONS = ("base", "step7", "step50")
 COMPARISONS = [("step7-base", "step7", "base"), ("step50-base", "step50", "base"), ("step50-step7", "step50", "step7")]
 
 
+def scheduler_provenance(config):
+    """Canonicalize Diffusers' unordered default-key metadata for comparison."""
+    config = dict(config)
+    if "_use_default_values" in config:
+        config["_use_default_values"] = sorted(config["_use_default_values"])
+    return config
+
+
 def collect_shards(root: Path, if_ready: bool = False):
     """Return records only after all eight manifests declare successful completion."""
     manifests = []
@@ -64,7 +72,10 @@ def collect_shards(root: Path, if_ready: bool = False):
             "git_sha",
             "model_config_hashes",
         ):
-            if manifest[key] != manifests[0][key]:
+            actual, reference = manifest[key], manifests[0][key]
+            if key == "scheduler":
+                actual, reference = scheduler_provenance(actual), scheduler_provenance(reference)
+            if actual != reference:
                 raise ValueError(f"Shard {task} has mismatched {key}")
         if any(args[key] != manifests[0]["arguments"][key] for key in settings):
             raise ValueError(f"Shard {task} has mismatched generation settings")

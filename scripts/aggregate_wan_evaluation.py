@@ -61,7 +61,7 @@ def aggregate(root, if_ready=False, log_wandb=False):
                 entity=os.environ["WANDB_ENTITY"],
                 project=os.environ["WANDB_PROJECT"],
                 mode="offline",
-                name=f"job-{os.environ['SLURM_ARRAY_JOB_ID']}-base-step7-step50-combined-eval-killarney",
+                name=f"job-{os.environ['SLURM_ARRAY_JOB_ID']}-base-step7-step50-combined-eval-narval",
                 group=os.environ.get("WANDB_RUN_GROUP"),
                 dir=str(root),
                 config={

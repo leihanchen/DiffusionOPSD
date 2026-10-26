@@ -13,16 +13,20 @@ task 7 covers 56–63. Seeds equal the original zero-based prompt index.
 Each task compares base, step 7 and step 50 with identical paired inputs.
 The original Wan2.2 inference preset and training configuration are preserved.
 
-Each task requests one 80 GiB H100, four CPU cores, 128 GiB RAM and two hours in
-`gpubase_h100_b1`. Policy, text encoder, VAE and scorers share `cuda:0` and run
-sequentially without gradients. The array limits concurrency to two tasks
-(two GPUs total). The original non-array entry point still defaults to two GPUs.
-Recorded 121-frame runs peaked at approximately 32 GiB for generation and
-15 GiB for scorers on separate GPUs; this supports trying colocation on 80 GiB,
-but does not constitute a measured single-GPU peak for this workload.
-Each task generates 24 videos, approximately 72 minutes of generation at the
-previous measured rate, plus loading, scoring, export and logging overhead.
-The two-hour budget is an estimate; scheduling and runtime are not guaranteed.
+Each task requests two 40 GiB A100 GPUs, eight CPU cores, 128 GiB RAM and four
+hours on Narval under `def-wangcs_gpu`. Partition selection is left to Narval;
+the current four-hour request routes to `gpubase_bygpu_b2`. Policy, text encoder
+and VAE use `cuda:0`; scorers use `cuda:1`. The array limits concurrency to two
+tasks (four GPUs total). The non-array entry point also requests two A100s,
+with a 24-hour limit and automatic partition selection.
+The policy GPU capacity check defaults to 39 GiB; set `MIN_GPU_MEMORY_GIB=0`
+at submission to disable it. Recorded 121-frame runs peaked at approximately
+32 GiB for generation and 15 GiB for scorers on separate GPUs.
+Each task generates 24 videos. Narval job 4537528 used two A100s with the same
+704x1280, 121-frame, 50-step preset; native-sampler videos took 427–473 seconds
+each including scoring and export. This projects to approximately three hours
+per shard. The four-hour limit adds margin for loading, verification and W&B
+logging; full-shard runtime on Narval has not yet been measured.
 
 Results live in `logs/wan22-full-epoch-array-ARRAY_ID/task_0` through `task_7`.
 Each successful task checks whether all eight completed. The last task validates
@@ -34,7 +38,7 @@ Incomplete runs never produce a completed combined manifest; task records remain
 
 Each shard and the combined result have separate offline W&B runs under
 `cvis_tmu/diffusionopsd`, grouped by array ID. Names include job/task ID, purpose
-and `killarney`. The combined run includes all videos and 192 comparison rows.
+and `narval`. The combined run includes all videos and 192 comparison rows.
 Sync these runs after verifying completion; no cluster network connection is needed.
 
 If a task fails, preserve and move its partial `task_N` directory before retrying
