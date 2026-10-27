@@ -35,6 +35,7 @@ if [[ -n "${CHECKPOINT_MANIFEST:-}" ]]; then
   POLICY_PATH="$CHECKPOINT_MANIFEST"
 fi
 MONITOR_ARGS=(--fps "${FPS:-8}")
+MONITOR_ARGS+=(--prompt-start "${PROMPT_START:-0}")
 [[ "${COMPARE_CHECKPOINTS:-0}" == 1 ]] && MONITOR_ARGS+=(--compare-checkpoints)
 [[ "${TABLE_LOGGING:-0}" == 1 ]] && MONITOR_ARGS+=(--table-logging)
 [[ "${REPORT_PROMPT_STRATA:-0}" == 1 ]] && MONITOR_ARGS+=(--report-prompt-strata)
@@ -46,7 +47,7 @@ CHECKPOINT_ARGS=(--checkpoint-format "$CHECKPOINT_FORMAT")
 if [[ -n "${EXPECTED_UPDATE:-}" ]]; then
   CHECKPOINT_ARGS+=(--expected-update "$EXPECTED_UPDATE")
 fi
-OUTPUT="${REPO}/logs/wan22-inference-${SLURM_JOB_ID}"
+OUTPUT="${INFERENCE_OUTPUT_DIR:-${REPO}/logs/wan22-inference-${SLURM_JOB_ID}}"
 export HF_HOME="${REPO}/hf"
 export TORCH_HOME="${REPO}/video_reward_ckpts"
 export VIDEO_REWARD_CKPT_PATH="${REPO}/video_reward_ckpts"

@@ -54,6 +54,9 @@ def parse_args(argv=None):
     p.add_argument("--model", default="${VIDEO_REWARD_CKPT_PATH}/Wan2.2-TI2V-5B-Diffusers")
     p.add_argument("--prompts", type=Path, default=Path("data/video_motion/test.txt"))
     p.add_argument("--num-prompts", type=int, default=2)
+    p.add_argument(
+        "--prompt-start", type=int, default=0, help="Zero-based offset; retain original prompt indices/seeds"
+    )
     p.add_argument("--seed-offsets", type=int, nargs="+", default=[0, 1000])
     p.add_argument("--height", type=int, default=480)
     p.add_argument("--width", type=int, default=832)
@@ -96,7 +99,9 @@ def parse_args(argv=None):
         p.error("Use at least 5 frames and finite guidance > 1 for matched CFG paths")
     if min(a.seed_offsets) < 0 or len(set(a.seed_offsets)) != len(a.seed_offsets):
         p.error("Seed offsets must be distinct and nonnegative")
-    if max(a.seed_offsets) + a.num_prompts - 1 >= 2**63:
+    if a.prompt_start < 0:
+        p.error("--prompt-start must be nonnegative")
+    if max(a.seed_offsets) + a.prompt_start + a.num_prompts - 1 >= 2**63:
         p.error("Seeds must fit in a signed 64-bit integer")
     if a.checkpoint_manifest and a.sampler == "both":
         p.error("Checkpoint comparisons require one sampler: euler or native")
@@ -124,9 +129,9 @@ def parse_args(argv=None):
 def main(argv=None):
     cfg = parse_args(argv)
     prompts = [s.strip() for s in cfg.prompts.read_text().splitlines() if s.strip()]
-    if len(prompts) < cfg.num_prompts:
+    if len(prompts) < cfg.prompt_start + cfg.num_prompts:
         raise ValueError("Prompt file contains fewer prompts than requested")
-    prompts = prompts[: cfg.num_prompts]
+    prompts = prompts[cfg.prompt_start : cfg.prompt_start + cfg.num_prompts]
     output = prepare_output(cfg.output_dir)
     run = None
     try:
@@ -153,7 +158,8 @@ def main(argv=None):
             "arguments": vars(cfg),
             "negative_prompt": "",
             "prompts": prompts,
-            "seeds": [[i + offset for offset in cfg.seed_offsets] for i in range(len(prompts))],
+            "prompt_indices": list(range(cfg.prompt_start, cfg.prompt_start + len(prompts))),
+            "seeds": [[cfg.prompt_start + i + offset for offset in cfg.seed_offsets] for i in range(len(prompts))],
             "checkpoint_sha256": file_hash(cfg.policy or cfg.checkpoint_manifest),
             "prompt_file_sha256": file_hash(cfg.prompts),
             "git_sha": git("rev-parse", "HEAD"),
@@ -197,6 +203,7 @@ def main(argv=None):
             name=os.environ.get("WANDB_RUN_NAME", f"wan22-inference-{os.environ.get('SLURM_JOB_ID', output.name)}"),
             dir=str(output),
             mode="offline",
+            group=os.environ.get("WANDB_RUN_GROUP"),
             config={k: str(v) if isinstance(v, Path) else v for k, v in vars(cfg).items()},
         )
         run.config.update({"checkpoint": checkpoint_metadata, "checkpoint_sha256": manifest["checkpoint_sha256"]})

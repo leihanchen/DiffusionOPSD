@@ -114,3 +114,12 @@ def test_invalid_config_rejected(arguments, tmp_path, contents):
 def test_missing_config_rejected(arguments, tmp_path):
     with pytest.raises(SystemExit):
         cli.parse_args(arguments + ["--config", str(tmp_path / "missing.json")])
+
+
+def test_shard_offsets_and_seed_overflow(arguments):
+    cfg = cli.parse_args(arguments + ["--prompt-start", "56", "--num-prompts", "8", "--seed-offsets", "0"])
+    assert cfg.prompt_start == 56 and cfg.num_prompts == 8
+    with pytest.raises(SystemExit):
+        cli.parse_args(arguments + ["--prompt-start", "-1"])
+    with pytest.raises(SystemExit):
+        cli.parse_args(arguments + ["--prompt-start", str(2**63 - 1)])
