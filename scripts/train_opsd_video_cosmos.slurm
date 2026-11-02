@@ -13,6 +13,8 @@
 #SBATCH --error=logs/%x-%j.err
 
 set -euo pipefail
+export WANDB_ENTITY="${WANDB_ENTITY:-cvis_tmu}" WANDB_PROJECT="${WANDB_PROJECT:-diffusionopsd}"
+export WANDB_CLUSTER_NAME="${WANDB_CLUSTER_NAME:-${SLURM_CLUSTER_NAME:-}}"
 cd "${SLURM_SUBMIT_DIR:?Submit from repository root}"
 export COSMOS_USE_GPU=1 HF_HUB_OFFLINE=1 PYTHONNOUSERSITE=1 WANDB_MODE=offline
 export PYTHONFAULTHANDLER=1

@@ -637,6 +637,35 @@ This release builds on Hugging Face [Diffusers](https://github.com/huggingface/d
 
 Released under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for third-party attribution and weight-license boundaries.
 
+## Video training logs
+
+All video OPSD trainers (Wan single-worker/distributed and Cosmos) automatically create offline W&B runs in the
+training directory's `wandb/` folder. Logging requires no API key or network access. Default destination is
+`cvis_tmu/diffusionopsd`; override it with `WANDB_ENTITY` and `WANDB_PROJECT`. There is no automatic upload.
+Failures initializing or writing logging records stop training; existing JSONL, journals, and MP4 files remain available.
+Abrupt termination (node loss, SIGKILL, or hard OOM) cannot guarantee SDK finalization.
+
+Each job execution gets a fresh run named `job-JOB_ID-BACKBONE-opsd-training-CLUSTER`; `WANDB_RUN_PURPOSE` overrides the
+purpose. Cluster comes from `WANDB_CLUSTER_NAME` or `SLURM_CLUSTER_NAME` (required for Slurm; local runs use `local`).
+Resumed jobs share an experiment group and log only their own activity at absolute `optimizer_updates`. Repeated events
+at one optimizer update use separate W&B event indices. Logging metadata is stored in `logging/run-*.json`, durable local
+events in `logging/events-*.jsonl`, and the experiment group in `logging/experiment.json`. Existing checkpoint formats
+remain loadable; new resumable checkpoints also record the group.
+
+Logged data includes configuration/provenance, training metrics, evaluation scores, existing timing/memory measurements,
+and all evaluation videos enabled by the experiment configuration. View videos in W&B Workspace media panels using
+`eval/prompt_0/video`, `eval/prompt_1/video`, etc.; captions identify prompt, seed, and optimizer update. These are held-out
+evaluation outputs. Disabling video saving disables media logging without disabling evaluation scores.
+
+To upload a completed offline run explicitly (use the directory recorded as `offline_directory` in its logging manifest):
+
+```bash
+wandb sync --entity cvis_tmu --project diffusionopsd /path/to/run/wandb/offline-run-TIMESTAMP-ID
+```
+
+Future video training entry points must use `VideoTrainingLogger` for the entire model-loading/training lifecycle;
+the video test suite checks this contract. Image trainers and non-OPSD baselines retain their existing logging behavior.
+
 ## Cosmos3-Nano video OPSD
 
 The Cosmos trainer supports `nvidia/Cosmos3-Nano` text-to-video with native UniPC sampling, intermediate-query capture,

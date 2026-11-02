@@ -33,6 +33,8 @@
 #SBATCH --error=logs/%x-%j.err
 
 set -euo pipefail
+export WANDB_ENTITY="${WANDB_ENTITY:-cvis_tmu}" WANDB_PROJECT="${WANDB_PROJECT:-diffusionopsd}"
+export WANDB_CLUSTER_NAME="${WANDB_CLUSTER_NAME:-${SLURM_CLUSTER_NAME:-}}"
 
 if [[ -z "${SLURM_SUBMIT_DIR:-}" ]]; then
   echo "Submit from the repo root: sbatch scripts/train_opsd_video_wan.slurm" >&2
@@ -113,6 +115,8 @@ apptainer exec --nv "${APPTAINER_BINDS[@]}" --pwd "${PWD}" \
   --env TRANSFORMERS_OFFLINE=1 \
   --env HF_DATASETS_OFFLINE=1 \
   --env HF_HUB_DISABLE_TELEMETRY=1 \
+  --env "WANDB_ENTITY=$WANDB_ENTITY" --env "WANDB_PROJECT=$WANDB_PROJECT" \
+  --env "WANDB_CLUSTER_NAME=$WANDB_CLUSTER_NAME" --env "WANDB_RUN_PURPOSE=${WANDB_RUN_PURPOSE:-}" \
   --env WANDB_MODE=offline \
   --env "WANDB_DIR=${WANDB_DIR}" \
   --env "TORCH_HOME=${TORCH_HOME}" \

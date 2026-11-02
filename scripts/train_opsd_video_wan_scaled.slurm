@@ -5,6 +5,8 @@
 #SBATCH --error=logs/%x-%j.err
 
 set -euo pipefail
+export WANDB_ENTITY="${WANDB_ENTITY:-cvis_tmu}" WANDB_PROJECT="${WANDB_PROJECT:-diffusionopsd}"
+export WANDB_CLUSTER_NAME="${WANDB_CLUSTER_NAME:-${SLURM_CLUSTER_NAME:-}}"
 cd "${SLURM_SUBMIT_DIR:?Submit from repository root}"
 REPO="$PWD"
 RUN_DIR="${WAN_EPOCH_RUN_DIR:?Use the scaled submission wrapper}"
@@ -50,6 +52,8 @@ srun --label --ntasks="$SLURM_NTASKS" --ntasks-per-node="$WAN_SCALE_WORKERS_PER_
     --env "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" \
     --env "NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}" \
     --env "NCCL_CUMEM_HOST_ENABLE=${NCCL_CUMEM_HOST_ENABLE:-0}" \
+    --env "WANDB_ENTITY=$WANDB_ENTITY" --env "WANDB_PROJECT=$WANDB_PROJECT" \
+    --env "WANDB_CLUSTER_NAME=$WANDB_CLUSTER_NAME" --env "WANDB_RUN_PURPOSE=${WANDB_RUN_PURPOSE:-}" \
     --env PYTHONNOUSERSITE=1 --env WANDB_MODE=offline --env "WANDB_DIR=$WANDB_DIR" \
     --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 --env HF_DATASETS_OFFLINE=1 \
     --env "HF_HOME=$HF_HOME" --env "TORCH_HOME=$TORCH_HOME" \

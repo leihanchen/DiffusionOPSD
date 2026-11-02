@@ -24,13 +24,11 @@ for path in (ROOT / "src", ROOT):
 import numpy as np
 import torch
 import torch.distributed as dist
-import wandb
 from absl import app, flags
 from diffusers import WanPipeline
 from ml_collections import config_flags
 from peft import get_peft_model_state_dict, set_peft_model_state_dict
 
-from diffusionopsd.metrics import install_wandb_jsonl_tee
 from diffusionopsd.stat_tracking import PerPromptStatTracker
 from diffusionopsd.video.nccl_network import configure_socket_interface
 from diffusionopsd.video.branch_loss import branch_loss
@@ -58,6 +56,7 @@ from diffusionopsd.video.geo_reward import GeoReward
 from diffusionopsd.video.opa_video import opa_tr_step_nd
 from diffusionopsd.video.quality_judge import load_video_reward
 from diffusionopsd.video.training_eval import EvaluationMonitor, evaluation_due
+from diffusionopsd.video.training_logging import VideoTrainingLogger
 from diffusionopsd.video.wan_clean_output import WanRollout, clean_output
 from diffusionopsd.video.wan_geometry import latent_shape_from_pipe, require_expand_timesteps
 from diffusionopsd.video.wan_policy import attach_lora, ema_adapter_
@@ -114,13 +113,8 @@ def _broadcast_adapter(policy):
             dist.broadcast(parameter.data, src=0)
 
 
-def _log(record, videos=()):
-    payload = dict(record)
-    if videos:
-        payload["eval/videos"] = [
-            wandb.Video(v["path"], format="mp4", caption=f"{v['prompt']} | seed={v['seed']}") for v in videos
-        ]
-    wandb.log(payload, step=record["optimizer_updates"])
+def _log(record, videos=(), *, logger):
+    logger.log_record(record, videos)
     print(json.dumps(record, allow_nan=False), flush=True)
 
 
@@ -409,301 +403,98 @@ def main(_):
             f"got {state['next_update'] if state else 'no checkpoint'}"
         )
     _trace("resume_checkpoint:exit")
-    if rank == 0:
-        wandb.init(
-            project="diffusionopsd",
-            group=run_dir.name,
-            name=f"{run_dir.name}-job-{os.environ['SLURM_JOB_ID']}",
-            dir=str(run_dir),
-            mode="offline",
-            config={
-                **cfg.to_dict(),
-                "execution": {
-                    **topology,
-                    "placements": placements,
-                    "topology_migrations": migrations,
-                    "resume_checkpoint": str(source_path) if state is not None else None,
-                },
-                "monitoring": {
-                    "eval_freq": FLAGS.monitor_eval_freq or cfg.eval_freq,
-                    "evaluate_on_resume": FLAGS.evaluate_on_resume,
-                    "expected_resume_update": FLAGS.expected_resume_update,
-                    "max_updates_this_job": FLAGS.max_updates_this_job,
-                },
-            },
-        )
-        install_wandb_jsonl_tee(wandb, run_dir / "metrics.jsonl", durable=True, strict=True)
-    model_path = os.path.expandvars(cfg.pretrained.model)
-    _trace("wan_model:enter")
-    pipe = WanPipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16, local_files_only=True).to("cuda:0")
-    _trace("wan_model:exit")
-    pipe.vae.requires_grad_(False).to(cfg.vae_device)
-    pipe.text_encoder.requires_grad_(False)
-    require_expand_timesteps(pipe, model_path)
-    pipe.transformer.requires_grad_(False)
-    pipe.transformer.enable_gradient_checkpointing()
-    policy = attach_lora(pipe.transformer, cfg.train.lora_path)
-    pipe.transformer = policy
-    _trace("adapter_state:enter")
-    if state is None:
-        _broadcast_adapter(policy)
-    else:
-        _load_adapter(policy, state)
-    _trace("adapter_state:exit")
-    trainable = [p for p in policy.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(trainable, lr=cfg.train.learning_rate, weight_decay=cfg.train.adam_weight_decay)
-    if state is not None:
-        opt.load_state_dict(state["optimizer"])
-    roll = WanRollout(
-        pipe, cfg.sample.num_steps, cfg.sample.guidance_scale, offload_vae_activations=cfg.offload_vae_activations
+    logger = VideoTrainingLogger(
+        run_dir, {**cfg.to_dict(), "execution": {**topology, "placements": placements,
+                  "topology_migrations": migrations},
+                  "monitoring": {"eval_freq": FLAGS.monitor_eval_freq or cfg.eval_freq,
+                                 "evaluate_on_resume": FLAGS.evaluate_on_resume,
+                                 "max_updates_this_job": FLAGS.max_updates_this_job}},
+        "wan22", rank=rank, start_update=state["next_update"] if state else 0,
+        resume_checkpoint=source_path if state else None,
+        experiment_group=state.get("logging_experiment_group") if state else None,
     )
-    _trace("geometry_models:enter")
-    reward = GeoReward(
-        load_depth_anything3(cfg.reward_device), load_waft(cfg.reward_device), load_dinov2(cfg.reward_device)
-    ).requires_grad_(False)
-    _trace("geometry_models:exit")
-    _trace("quality_model:enter")
-    judge = load_video_reward(cfg.judge.device, num_frames=cfg.judge.num_frames)
-    _trace("quality_model:exit")
-    tracker = PerPromptStatTracker(cfg.sample.global_std) if rank == 0 else None
-    if state is None:
-        if rank == 0:
-            nonce = int.from_bytes(os.urandom(8), "big")
-            order = prompt_schedule(prompts, nonce, 4)
-            policy.set_adapter("old")
-            refs, tau_id, tau_motion = _calibrate(pipe, roll, reward, cfg, prompts, run_dir)
-            policy.set_adapter("default")
-            with torch.no_grad():
-                metrics, videos = evaluator.evaluate(pipe, policy, roll, reward, judge, 0)
-            _log({"optimizer_updates": 0, **metrics}, videos)
-            evaluator_state = evaluator.baseline
-            payload = (nonce, order, refs, tau_id, tau_motion, evaluator_state)
+    with logger:
+        model_path = os.path.expandvars(cfg.pretrained.model)
+        _trace("wan_model:enter")
+        pipe = WanPipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16, local_files_only=True).to("cuda:0")
+        _trace("wan_model:exit")
+        pipe.vae.requires_grad_(False).to(cfg.vae_device)
+        pipe.text_encoder.requires_grad_(False)
+        require_expand_timesteps(pipe, model_path)
+        pipe.transformer.requires_grad_(False)
+        pipe.transformer.enable_gradient_checkpointing()
+        policy = attach_lora(pipe.transformer, cfg.train.lora_path)
+        pipe.transformer = policy
+        _trace("adapter_state:enter")
+        if state is None:
+            _broadcast_adapter(policy)
         else:
-            payload = None
-        values = [payload]
-        dist.broadcast_object_list(values, src=0)
-        nonce, order, refs, tau_id, tau_motion, evaluator_state = values[0]
-        completed, max_update_seconds = 0, None
-    else:
-        nonce, order, refs = state["nonce"], state["order"], state["reference_files"]
-        tau_id, tau_motion = state["tau_id"], state["tau_motion"]
-        completed, max_update_seconds = state["next_update"], state["max_update_seconds"]
-        if rank == 0:
-            tracker.stats = state["tracker_stats"]
-            tracker.history_prompts = {hash(prompt) for prompt in tracker.stats}
-            evaluator.baseline = state["eval_baseline"]
-        _trace("rng_restore:enter")
-        if topology_changed:
-            seed = topology_rng_seed(nonce, completed, rank)
-            random.seed(seed)
-            np.random.seed(seed % (2**32))
-            torch.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
-            _trace("rng_reseed", seed=seed)
+            _load_adapter(policy, state)
+        _trace("adapter_state:exit")
+        trainable = [p for p in policy.parameters() if p.requires_grad]
+        opt = torch.optim.AdamW(trainable, lr=cfg.train.learning_rate, weight_decay=cfg.train.adam_weight_decay)
+        if state is not None:
+            opt.load_state_dict(state["optimizer"])
+        roll = WanRollout(
+            pipe, cfg.sample.num_steps, cfg.sample.guidance_scale, offload_vae_activations=cfg.offload_vae_activations
+        )
+        _trace("geometry_models:enter")
+        reward = GeoReward(
+            load_depth_anything3(cfg.reward_device), load_waft(cfg.reward_device), load_dinov2(cfg.reward_device)
+        ).requires_grad_(False)
+        _trace("geometry_models:exit")
+        _trace("quality_model:enter")
+        judge = load_video_reward(cfg.judge.device, num_frames=cfg.judge.num_frames)
+        _trace("quality_model:exit")
+        tracker = PerPromptStatTracker(cfg.sample.global_std) if rank == 0 else None
+        if state is None:
+            if rank == 0:
+                nonce = int.from_bytes(os.urandom(8), "big")
+                order = prompt_schedule(prompts, nonce, 4)
+                policy.set_adapter("old")
+                refs, tau_id, tau_motion = _calibrate(pipe, roll, reward, cfg, prompts, run_dir)
+                logger.log_event(0, "calibration", {"tau_id": float(tau_id), "tau_motion": float(tau_motion),
+                                                  "tau_q": cfg.gates.tau_q})
+                policy.set_adapter("default")
+                with torch.no_grad():
+                    metrics, videos = evaluator.evaluate(pipe, policy, roll, reward, judge, 0)
+                _log({"optimizer_updates": 0, **metrics}, videos, logger=logger)
+                evaluator_state = evaluator.baseline
+                payload = (nonce, order, refs, tau_id, tau_motion, evaluator_state)
+            else:
+                payload = None
+            values = [payload]
+            dist.broadcast_object_list(values, src=0)
+            nonce, order, refs, tau_id, tau_motion, evaluator_state = values[0]
+            completed, max_update_seconds = 0, None
         else:
-            _restore_rng(state["rng_states"][rank])
-        _trace("rng_restore:exit")
-        if rank == 0 and FLAGS.evaluate_on_resume:
-            _trace("resume_evaluation:enter", optimizer_updates=completed)
-            metrics, videos = evaluator.evaluate(pipe, policy, roll, reward, judge, completed)
-            _log({"optimizer_updates": completed, **metrics}, videos)
-            _trace("resume_evaluation:exit", optimizer_updates=completed)
-    if state is None:
-        rng_states = [None] * world
-        dist.all_gather_object(rng_states, _rng_state())
-    if rank == 0 and state is None:
-        _save_state(
-            state_path,
-            policy,
-            opt,
-            tracker,
-            evaluator,
-            prompt_hash,
-            config_hash,
-            nonce,
-            order,
-            refs,
-            tau_id,
-            tau_motion,
-            completed,
-            max_update_seconds,
-            rng_states,
-            cfg.to_dict(),
-            topology,
-            migrations,
-        )
-    _barrier("startup_barrier")
-    del state
-    initial_completed = completed
-    while completed < cfg.num_epochs:
-        if rank == 0:
-            can_start = should_start_update(
-                completed, cfg.num_epochs, time.monotonic() - started, max_update_seconds, FLAGS.job_budget_hours * 3600
-            )
-            if FLAGS.max_updates_this_job and completed - initial_completed >= FLAGS.max_updates_this_job:
-                can_start = False
-        else:
-            can_start = None
-        decision = [can_start]
-        _trace("update_decision:enter")
-        dist.broadcast_object_list(decision, src=0)
-        _trace("update_decision:exit")
-        if not decision[0]:
-            break
-        update_start = time.monotonic()
-        for device in devices:
-            torch.cuda.reset_peak_memory_stats(device)
-        assignments = worker_sample_assignments(
-            order, completed, rank, world, single_node_smoke=FLAGS.single_node_smoke
-        )
-        policy.set_adapter("old")
-        _trace(f"update_{completed + 1}:sampling:enter")
-        tuples = []
-        for index, rollout_indices in assignments:
-            tuples.extend(
-                _sample_local(pipe, roll, reward, judge, cfg, prompts[index], index, nonce, refs, rollout_indices)
-            )
-        local_rollouts = len(tuples)
-        _trace(f"update_{completed + 1}:sampling:exit")
-        # VideoReward is not used by the differentiable geometry target. Move its
-        # frozen weights off the scorer GPU before WAFT recomputes in backward.
-        judge.to("cpu")
-        with torch.cuda.device(cfg.judge.device):
-            torch.cuda.empty_cache()
-        gathered = [None] * world
-        dist.all_gather_object(
-            gathered,
-            [{key: t[key] for key in ("prompt", "prompt_index", "rollout_index", "r", "m", "p_q")} for t in tuples],
-        )
-        flat = canonical_samples(gathered, order, completed, world, single_node_smoke=FLAGS.single_node_smoke)
-        global_rollouts = len(flat)
-        sample_seconds = time.monotonic() - update_start
-        if rank == 0:
-            advantages = tracker.update([entry["prompt"] for entry in flat], np.array([entry["r"] for entry in flat]))
-            weights = [
-                float(
-                    effective_weight(
-                        torch.tensor([float(a)]),
-                        cfg.train.adv_clip_max,
-                        torch.tensor([entry["m"]]),
-                        tau_motion,
-                        torch.tensor([entry["p_q"]]),
-                        cfg.gates.tau_q,
-                    )
-                )
-                for entry, a in zip(flat, advantages)
-            ]
-            weight_groups = route_sample_weights(flat, weights, gathered)
-        else:
-            weight_groups = None
-        weight_box = [weight_groups]
-        dist.broadcast_object_list(weight_box, src=0)
-        target_start = time.monotonic()
-        _trace(f"update_{completed + 1}:target_gradients:enter")
-        local_kept, local_loss = _targets_and_gradients(
-            tuples, weight_box[0][rank], roll, reward, policy, opt, cfg, tau_id
-        )
-        _trace(f"update_{completed + 1}:target_gradients:exit")
-        judge.to(cfg.judge.device)
-        target_seconds = time.monotonic() - target_start
-        optimizer_start = time.monotonic()
-        counts = torch.tensor(
-            [
-                local_kept,
-                local_loss,
-                sum(t["r"] for t in tuples),
-                sum(weight_box[0][rank]),
-                sum(t["m"] < tau_motion for t in tuples),
-                sum(t["p_q"] < cfg.gates.tau_q for t in tuples),
-            ],
-            device="cuda:0",
-            dtype=torch.float64,
-        )
-        _trace("update_counts:enter", retained_rollouts=local_kept)
-        dist.all_reduce(counts, op=dist.ReduceOp.SUM)
-        _trace("update_counts:exit")
-        total_kept = int(counts[0].item())
-        if total_kept == 0:
-            raise RuntimeError("No retained rollout in global update")
-        synchronize_gradients(trainable, total_kept)
-        grad_norm = torch.nn.utils.clip_grad_norm_(trainable, cfg.train.max_grad_norm)
-        if not torch.isfinite(grad_norm) or grad_norm <= 0:
-            raise RuntimeError(f"Invalid gradient norm at update {completed + 1}: {grad_norm}")
-        opt.step()
-        ema_adapter_(policy, src="default", dst="old", decay=0.99)
-        opt.zero_grad(set_to_none=True)
-        tuples.clear()
-        _trace("adapter_consistency:enter")
-        adapter_hashes = {
-            name: adapter_fingerprint(get_peft_model_state_dict(policy, adapter_name=name))
-            for name in ("default", "old")
-        }
-        worker_hashes = [None] * world
-        dist.all_gather_object(worker_hashes, adapter_hashes)
-        if any(hashes != adapter_hashes for hashes in worker_hashes):
-            raise RuntimeError("Worker adapter states differ after the global optimizer update")
-        _trace("adapter_consistency:exit", adapter_hashes=adapter_hashes)
-        for device in devices:
-            torch.cuda.synchronize(device)
-        optimizer_seconds = time.monotonic() - optimizer_start
-        local_duration = time.monotonic() - update_start
-        timings = torch.tensor([local_duration], device="cuda:0")
-        dist.all_reduce(timings, op=dist.ReduceOp.MAX)
-        phase_times = torch.tensor([sample_seconds, target_seconds, optimizer_seconds], device="cuda:0")
-        dist.all_reduce(phase_times, op=dist.ReduceOp.MAX)
-        completed += 1
-        max_update_seconds = max(max_update_seconds or 0, float(timings.item()))
-        peaks = {
-            f"gpu/{rank}/{device}/peak_{kind}_bytes": measure(device)
-            for device in devices
-            for kind, measure in (
-                ("allocated", torch.cuda.max_memory_allocated),
-                ("reserved", torch.cuda.max_memory_reserved),
-            )
-        }
-        peaks[f"worker/{rank}/host_peak_rss_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
-        peak_list = [None] * world
-        dist.all_gather_object(peak_list, peaks)
-        if rank == 0:
-            record = {
-                "optimizer_updates": completed,
-                "train/rl_distillation_loss": counts[1].item() / total_kept,
-                "train/optimization_loss": counts[1].item() * cfg.train.adv_clip_max / total_kept,
-                "grad_norm": float(grad_norm),
-                "n_rollouts": global_rollouts,
-                "execution/world_size": world,
-                "execution/adapters_consistent": True,
-                "execution/default_adapter_sha256": adapter_hashes["default"],
-                "execution/old_adapter_sha256": adapter_hashes["old"],
-                "execution/workers_per_node": topology["workers_per_node"],
-                "execution/prompts_per_update": 4,
-                "execution/rollouts_per_worker": local_rollouts,
-                "execution/single_node_smoke": FLAGS.single_node_smoke,
-                "n_kept": total_kept,
-                "mean_r": counts[2].item() / global_rollouts,
-                "mean_w": counts[3].item() / global_rollouts,
-                "frac_motion_masked": counts[4].item() / global_rollouts,
-                "frac_quality_masked": counts[5].item() / global_rollouts,
-                "tau_id": tau_id,
-                "tau_motion": tau_motion,
-                "train/update_seconds": float(timings.item()),
-                "train/sampling_seconds": float(phase_times[0]),
-                "train/target_seconds": float(phase_times[1]),
-                "train/optimizer_seconds": float(phase_times[2]),
-                **{key: value for group in peak_list for key, value in group.items()},
-            }
-            videos = []
-            if evaluation_due(completed, cfg.num_epochs, cfg.eval_freq, override_freq=FLAGS.monitor_eval_freq):
+            nonce, order, refs = state["nonce"], state["order"], state["reference_files"]
+            tau_id, tau_motion = state["tau_id"], state["tau_motion"]
+            completed, max_update_seconds = state["next_update"], state["max_update_seconds"]
+            if rank == 0:
+                tracker.stats = state["tracker_stats"]
+                tracker.history_prompts = {hash(prompt) for prompt in tracker.stats}
+                evaluator.baseline = state["eval_baseline"]
+            _trace("rng_restore:enter")
+            if topology_changed:
+                seed = topology_rng_seed(nonce, completed, rank)
+                random.seed(seed)
+                np.random.seed(seed % (2**32))
+                torch.manual_seed(seed)
+                torch.cuda.manual_seed_all(seed)
+                _trace("rng_reseed", seed=seed)
+            else:
+                _restore_rng(state["rng_states"][rank])
+            _trace("rng_restore:exit")
+            if rank == 0 and FLAGS.evaluate_on_resume:
+                _trace("resume_evaluation:enter", optimizer_updates=completed)
                 metrics, videos = evaluator.evaluate(pipe, policy, roll, reward, judge, completed)
-                record.update(metrics)
-            _log(record, videos)
-            if completed % cfg.save_freq == 0:
-                torch.save(
-                    get_peft_model_state_dict(policy, adapter_name="default"), run_dir / f"policy_{completed}.pt"
-                )
-        rng_states = [None] * world
-        dist.all_gather_object(rng_states, _rng_state())
-        if rank == 0:
+                _log({"optimizer_updates": completed, **metrics}, videos, logger=logger)
+                _trace("resume_evaluation:exit", optimizer_updates=completed)
+        if state is None:
+            rng_states = [None] * world
+            dist.all_gather_object(rng_states, _rng_state())
+        if rank == 0 and state is None:
             _save_state(
                 state_path,
                 policy,
@@ -723,23 +514,219 @@ def main(_):
                 cfg.to_dict(),
                 topology,
                 migrations,
+                logging_experiment_group=logger.experiment_group,
             )
-        _barrier(f"update_{completed}:checkpoint_barrier")
-    if rank == 0:
-        result = {
-            "status": "complete" if completed == cfg.num_epochs else "continue",
-            "completed_updates": completed,
-            "total_updates": cfg.num_epochs,
-            "run_dir": str(run_dir),
-            "job_id": os.environ["SLURM_JOB_ID"],
-            "single_node_smoke": FLAGS.single_node_smoke,
-            "topology": topology,
-        }
-        (run_dir / f"job_{os.environ['SLURM_JOB_ID']}.json").write_text(json.dumps(result, indent=2) + "\n")
-        wandb.finish()
-        print(json.dumps(result), flush=True)
-    _barrier("shutdown_barrier")
-    dist.destroy_process_group()
+            logger.log_event(completed, "checkpoint", {"path": str(state_path)})
+        _barrier("startup_barrier")
+        del state
+        initial_completed = completed
+        while completed < cfg.num_epochs:
+            if rank == 0:
+                can_start = should_start_update(
+                    completed, cfg.num_epochs, time.monotonic() - started, max_update_seconds, FLAGS.job_budget_hours * 3600
+                )
+                if FLAGS.max_updates_this_job and completed - initial_completed >= FLAGS.max_updates_this_job:
+                    can_start = False
+            else:
+                can_start = None
+            decision = [can_start]
+            _trace("update_decision:enter")
+            dist.broadcast_object_list(decision, src=0)
+            _trace("update_decision:exit")
+            if not decision[0]:
+                break
+            update_start = time.monotonic()
+            for device in devices:
+                torch.cuda.reset_peak_memory_stats(device)
+            assignments = worker_sample_assignments(
+                order, completed, rank, world, single_node_smoke=FLAGS.single_node_smoke
+            )
+            policy.set_adapter("old")
+            _trace(f"update_{completed + 1}:sampling:enter")
+            tuples = []
+            for index, rollout_indices in assignments:
+                tuples.extend(
+                    _sample_local(pipe, roll, reward, judge, cfg, prompts[index], index, nonce, refs, rollout_indices)
+                )
+            local_rollouts = len(tuples)
+            _trace(f"update_{completed + 1}:sampling:exit")
+            # VideoReward is not used by the differentiable geometry target. Move its
+            # frozen weights off the scorer GPU before WAFT recomputes in backward.
+            judge.to("cpu")
+            with torch.cuda.device(cfg.judge.device):
+                torch.cuda.empty_cache()
+            gathered = [None] * world
+            dist.all_gather_object(
+                gathered,
+                [{key: t[key] for key in ("prompt", "prompt_index", "rollout_index", "r", "m", "p_q")} for t in tuples],
+            )
+            flat = canonical_samples(gathered, order, completed, world, single_node_smoke=FLAGS.single_node_smoke)
+            global_rollouts = len(flat)
+            sample_seconds = time.monotonic() - update_start
+            if rank == 0:
+                advantages = tracker.update([entry["prompt"] for entry in flat], np.array([entry["r"] for entry in flat]))
+                weights = [
+                    float(
+                        effective_weight(
+                            torch.tensor([float(a)]),
+                            cfg.train.adv_clip_max,
+                            torch.tensor([entry["m"]]),
+                            tau_motion,
+                            torch.tensor([entry["p_q"]]),
+                            cfg.gates.tau_q,
+                        )
+                    )
+                    for entry, a in zip(flat, advantages)
+                ]
+                weight_groups = route_sample_weights(flat, weights, gathered)
+            else:
+                weight_groups = None
+            weight_box = [weight_groups]
+            dist.broadcast_object_list(weight_box, src=0)
+            target_start = time.monotonic()
+            _trace(f"update_{completed + 1}:target_gradients:enter")
+            local_kept, local_loss = _targets_and_gradients(
+                tuples, weight_box[0][rank], roll, reward, policy, opt, cfg, tau_id
+            )
+            _trace(f"update_{completed + 1}:target_gradients:exit")
+            judge.to(cfg.judge.device)
+            target_seconds = time.monotonic() - target_start
+            optimizer_start = time.monotonic()
+            counts = torch.tensor(
+                [
+                    local_kept,
+                    local_loss,
+                    sum(t["r"] for t in tuples),
+                    sum(weight_box[0][rank]),
+                    sum(t["m"] < tau_motion for t in tuples),
+                    sum(t["p_q"] < cfg.gates.tau_q for t in tuples),
+                ],
+                device="cuda:0",
+                dtype=torch.float64,
+            )
+            _trace("update_counts:enter", retained_rollouts=local_kept)
+            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+            _trace("update_counts:exit")
+            total_kept = int(counts[0].item())
+            if total_kept == 0:
+                raise RuntimeError("No retained rollout in global update")
+            synchronize_gradients(trainable, total_kept)
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable, cfg.train.max_grad_norm)
+            if not torch.isfinite(grad_norm) or grad_norm <= 0:
+                raise RuntimeError(f"Invalid gradient norm at update {completed + 1}: {grad_norm}")
+            opt.step()
+            ema_adapter_(policy, src="default", dst="old", decay=0.99)
+            opt.zero_grad(set_to_none=True)
+            tuples.clear()
+            _trace("adapter_consistency:enter")
+            adapter_hashes = {
+                name: adapter_fingerprint(get_peft_model_state_dict(policy, adapter_name=name))
+                for name in ("default", "old")
+            }
+            worker_hashes = [None] * world
+            dist.all_gather_object(worker_hashes, adapter_hashes)
+            if any(hashes != adapter_hashes for hashes in worker_hashes):
+                raise RuntimeError("Worker adapter states differ after the global optimizer update")
+            _trace("adapter_consistency:exit", adapter_hashes=adapter_hashes)
+            for device in devices:
+                torch.cuda.synchronize(device)
+            optimizer_seconds = time.monotonic() - optimizer_start
+            local_duration = time.monotonic() - update_start
+            timings = torch.tensor([local_duration], device="cuda:0")
+            dist.all_reduce(timings, op=dist.ReduceOp.MAX)
+            phase_times = torch.tensor([sample_seconds, target_seconds, optimizer_seconds], device="cuda:0")
+            dist.all_reduce(phase_times, op=dist.ReduceOp.MAX)
+            completed += 1
+            max_update_seconds = max(max_update_seconds or 0, float(timings.item()))
+            peaks = {
+                f"gpu/{rank}/{device}/peak_{kind}_bytes": measure(device)
+                for device in devices
+                for kind, measure in (
+                    ("allocated", torch.cuda.max_memory_allocated),
+                    ("reserved", torch.cuda.max_memory_reserved),
+                )
+            }
+            peaks[f"worker/{rank}/host_peak_rss_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+            peak_list = [None] * world
+            dist.all_gather_object(peak_list, peaks)
+            if rank == 0:
+                record = {
+                    "optimizer_updates": completed,
+                    "train/rl_distillation_loss": counts[1].item() / total_kept,
+                    "train/optimization_loss": counts[1].item() * cfg.train.adv_clip_max / total_kept,
+                    "grad_norm": float(grad_norm),
+                    "n_rollouts": global_rollouts,
+                    "execution/world_size": world,
+                    "execution/adapters_consistent": True,
+                    "execution/default_adapter_sha256": adapter_hashes["default"],
+                    "execution/old_adapter_sha256": adapter_hashes["old"],
+                    "execution/workers_per_node": topology["workers_per_node"],
+                    "execution/prompts_per_update": 4,
+                    "execution/rollouts_per_worker": local_rollouts,
+                    "execution/single_node_smoke": FLAGS.single_node_smoke,
+                    "n_kept": total_kept,
+                    "mean_r": counts[2].item() / global_rollouts,
+                    "mean_w": counts[3].item() / global_rollouts,
+                    "frac_motion_masked": counts[4].item() / global_rollouts,
+                    "frac_quality_masked": counts[5].item() / global_rollouts,
+                    "tau_id": tau_id,
+                    "tau_motion": tau_motion,
+                    "train/update_seconds": float(timings.item()),
+                    "train/sampling_seconds": float(phase_times[0]),
+                    "train/target_seconds": float(phase_times[1]),
+                    "train/optimizer_seconds": float(phase_times[2]),
+                    **{key: value for group in peak_list for key, value in group.items()},
+                }
+                videos = []
+                if evaluation_due(completed, cfg.num_epochs, cfg.eval_freq, override_freq=FLAGS.monitor_eval_freq):
+                    metrics, videos = evaluator.evaluate(pipe, policy, roll, reward, judge, completed)
+                    record.update(metrics)
+                _log(record, videos, logger=logger)
+                if completed % cfg.save_freq == 0:
+                    torch.save(
+                        get_peft_model_state_dict(policy, adapter_name="default"), run_dir / f"policy_{completed}.pt"
+                    )
+            rng_states = [None] * world
+            dist.all_gather_object(rng_states, _rng_state())
+            if rank == 0:
+                _save_state(
+                    state_path,
+                    policy,
+                    opt,
+                    tracker,
+                    evaluator,
+                    prompt_hash,
+                    config_hash,
+                    nonce,
+                    order,
+                    refs,
+                    tau_id,
+                    tau_motion,
+                    completed,
+                    max_update_seconds,
+                    rng_states,
+                    cfg.to_dict(),
+                    topology,
+                    migrations,
+                    logging_experiment_group=logger.experiment_group,
+                )
+                logger.log_event(completed, "checkpoint", {"path": str(state_path)})
+            _barrier(f"update_{completed}:checkpoint_barrier")
+        if rank == 0:
+            result = {
+                "status": "complete" if completed == cfg.num_epochs else "continue",
+                "completed_updates": completed,
+                "total_updates": cfg.num_epochs,
+                "run_dir": str(run_dir),
+                "job_id": os.environ["SLURM_JOB_ID"],
+                "single_node_smoke": FLAGS.single_node_smoke,
+                "topology": topology,
+            }
+            (run_dir / f"job_{os.environ['SLURM_JOB_ID']}.json").write_text(json.dumps(result, indent=2) + "\n")
+            logger.log_event(completed, "job_result", {"status": result["status"]})
+            print(json.dumps(result), flush=True)
+        _barrier("shutdown_barrier")
+        dist.destroy_process_group()
 
 
 def _save_state(
@@ -761,9 +748,11 @@ def _save_state(
     training_config,
     topology,
     migrations,
+    logging_experiment_group=None,
 ):
     state = {
         "version": 2,
+        "logging_experiment_group": logging_experiment_group,
         "training_config": {**training_config, "logdir": portable_path(training_config["logdir"], ROOT)},
         "training_config_hash": training_config_hash(training_config),
         "topology": topology,
