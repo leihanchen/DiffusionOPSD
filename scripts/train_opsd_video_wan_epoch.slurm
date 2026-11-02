@@ -16,6 +16,8 @@
 #SBATCH --error=logs/%x-%j.err
 
 set -euo pipefail
+export WANDB_ENTITY="${WANDB_ENTITY:-cvis_tmu}" WANDB_PROJECT="${WANDB_PROJECT:-diffusionopsd}"
+export WANDB_CLUSTER_NAME="${WANDB_CLUSTER_NAME:-${SLURM_CLUSTER_NAME:-}}"
 cd "${SLURM_SUBMIT_DIR:?Submit from repository root}"
 REPO="$PWD"
 RUN_ID="${WAN_EPOCH_RUN_ID:-${SLURM_JOB_ID}}"
@@ -54,6 +56,8 @@ BINDS+=(--bind "$REPO/src:/opt/venv/lib/python3.12/site-packages/diffusionopsd")
 echo "Wan2.2 epoch run=$RUN_ID job=$SLURM_JOB_ID nodes=$SLURM_JOB_NODELIST master=$MASTER_ADDR budget_hours=$JOB_BUDGET_HOURS chain_jobs=$CHAIN_JOBS"
 srun --label --ntasks=4 --ntasks-per-node=1 --kill-on-bad-exit=1 \
   apptainer exec --nv "${BINDS[@]}" --pwd "$REPO" \
+    --env "WANDB_ENTITY=$WANDB_ENTITY" --env "WANDB_PROJECT=$WANDB_PROJECT" \
+    --env "WANDB_CLUSTER_NAME=$WANDB_CLUSTER_NAME" --env "WANDB_RUN_PURPOSE=${WANDB_RUN_PURPOSE:-}" \
     --env PYTHONNOUSERSITE=1 --env WANDB_MODE=offline --env "WANDB_DIR=$WANDB_DIR" \
     --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 --env HF_DATASETS_OFFLINE=1 \
     --env "HF_HOME=$HF_HOME" --env "TORCH_HOME=$TORCH_HOME" \

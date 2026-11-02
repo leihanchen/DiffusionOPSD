@@ -1,0 +1,9 @@
+# Overlay for diffusionopsd.sif. Install with --no-deps; keep its CUDA PyTorch.
+diffusers==0.42.1
+transformers==5.22.1
+peft==0.21.2
+huggingface-hub==1.32.0
+tokenizers==0.23.3
+safetensors==0.8.0
+regex==2026.9.29
+click==8.5.0

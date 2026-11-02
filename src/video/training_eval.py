@@ -129,6 +129,13 @@ class EvaluationMonitor:
         metrics.update({f"eval/{key}_delta": means[key] - base_means[key] for key in keys})
         metrics.update({f"eval/{key}": value for key, value in success.items()})
         metrics.update({"eval/num_prompts": len(rows), "eval/duration_seconds": time.perf_counter() - started})
+        for index, (row, base) in enumerate(zip(rows, baseline)):
+            for key in keys:
+                label = "identity" if key == "s_id" else key
+                if key in ("VQ", "MQ", "TA", "Overall"):
+                    label = f"quality_{key}"
+                metrics[f"eval/prompt_{index}/{label}"] = row[key]
+                metrics[f"eval/prompt_{index}/{label}_delta"] = row[key] - base[key]
         result = {
             "optimizer_updates": update,
             "prompts": rows,

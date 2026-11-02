@@ -134,7 +134,7 @@ def test_full_policy_evaluation_and_video_files(tmp_path, monkeypatch):
     assert metrics["eval/num_prompts"] == 2
     assert len(videos) == 2
     for video in videos:
-        reader = imageio.get_reader(video["path"])
+        reader = imageio.get_reader(video["path"], output_params=["-threads", "1"])
         try:
             assert reader.get_data(0).shape == (16, 16, 3)
         finally:
@@ -147,9 +147,7 @@ def test_full_policy_evaluation_and_video_files(tmp_path, monkeypatch):
 def test_training_continues_and_logs_offline_metrics_and_media(tmp_path, monkeypatch):
     import json
 
-    from diffusionopsd.metrics import install_wandb_jsonl_tee
-
-    import wandb
+    from diffusionopsd.video.training_logging import VideoTrainingLogger
     from scripts.train_opsd_video_wan import _log_record
 
     monitor = EvaluationMonitor(config(tmp_path, use_lora=False, eval_num_videos=2))
@@ -163,10 +161,7 @@ def test_training_continues_and_logs_offline_metrics_and_media(tmp_path, monkeyp
         return value.expand(1, 2, 3, 16, 16).clone()
 
     monkeypatch.setattr("diffusionopsd.video.training_eval.generate_clip", generate)
-    monkeypatch.setattr(wandb, "log", wandb.log)
-    run = wandb.init(project="diffusionopsd-test", dir=str(tmp_path), mode="offline")
-    try:
-        install_wandb_jsonl_tee(wandb, tmp_path / "metrics.jsonl")
+    with VideoTrainingLogger(tmp_path, {}, "wan-test") as logger:
         optimizer = torch.optim.SGD(policy.parameters(), lr=0.1)
         for update in range(5):
             if update:
@@ -181,11 +176,9 @@ def test_training_continues_and_logs_offline_metrics_and_media(tmp_path, monkeyp
             record = {"optimizer_updates": update, **metrics}
             if update:
                 record["train/rl_distillation_loss"] = float(((policy.weight.detach() - 0.9) ** 2).sum())
-            _log_record(record, videos)
+            _log_record(record, videos, logger=logger)
         assert policy.weight.item() > 0.1
-        assert run.settings.mode == "offline"
-    finally:
-        wandb.finish()
+        assert logger.run.settings.mode == "offline"
     rows = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]
     assert [row["_step"] for row in rows] == [0, 1, 2, 3, 4]
     assert all("train/rl_distillation_loss" in row for row in rows[1:])

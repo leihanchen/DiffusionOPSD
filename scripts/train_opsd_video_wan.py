@@ -3,6 +3,7 @@
 
 Single-node: policy on cuda:0, rewards on cuda:1.
 """
+# ruff: noqa: E402
 
 from __future__ import annotations
 
@@ -20,11 +21,9 @@ for path in (ROOT / "src", ROOT):
         sys.path.insert(0, str(path))
 
 import torch
-import wandb
 from absl import app, flags
 from diffusers import WanPipeline
 from diffusionopsd.ema import EMAModuleWrapper
-from diffusionopsd.metrics import install_wandb_jsonl_tee
 from diffusionopsd.stat_tracking import PerPromptStatTracker
 from diffusionopsd.video.branch_loss import branch_loss
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
@@ -33,6 +32,7 @@ from diffusionopsd.video.geo_reward import GeoReward
 from diffusionopsd.video.opa_video import opa_tr_step_nd
 from diffusionopsd.video.quality_judge import load_video_reward
 from diffusionopsd.video.training_eval import EvaluationMonitor, evaluation_due
+from diffusionopsd.video.training_logging import VideoTrainingLogger
 from diffusionopsd.video.wan_clean_output import WanRollout, clean_output
 from diffusionopsd.video.wan_policy import attach_lora, ema_adapter_
 from ml_collections import config_flags
@@ -53,29 +53,22 @@ def _prompt_seed(prompt: str) -> int:
     return int(hashlib.sha256(prompt.encode()).hexdigest()[:8], 16)
 
 
-def _log_record(record, videos=()):
+def _log_record(record, videos=(), *, logger):
     print(json.dumps(record), flush=True)
-    payload = dict(record)
-    if videos:
-        payload["eval/videos"] = [
-            wandb.Video(video["path"], format="mp4", caption=f"{video['prompt']} | seed={video['seed']}")
-            for video in videos
-        ]
-    wandb.log(payload, step=record["optimizer_updates"])
+    logger.log_record(record, videos)
 
 
 def main(_):
     cfg = FLAGS.config
     evaluator = EvaluationMonitor(cfg)  # Validate settings and prompts before loading models.
     os.makedirs(cfg.logdir, exist_ok=True)
-    wandb.init(
-        project="diffusionopsd",
-        name=cfg.run_name or f"wan22-opsd-{os.environ.get('SLURM_JOB_ID', 'local')}",
-        config=cfg.to_dict(),
-        dir=cfg.logdir,
-        mode="offline",
-    )
-    install_wandb_jsonl_tee(wandb, os.path.join(cfg.logdir, "metrics.jsonl"))
+    model_id = str(cfg.pretrained.model)
+    backbone = "wan22" if "wan2.2" in model_id.lower() else "wan21"
+    with VideoTrainingLogger(cfg.logdir, cfg.to_dict(), backbone) as logger:
+        _train(cfg, evaluator, logger)
+
+
+def _train(cfg, evaluator, logger):
     dev = "cuda:0"
     model_path = os.path.expandvars(cfg.pretrained.model)
     pipe = WanPipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16, local_files_only=True).to(dev)
@@ -141,13 +134,15 @@ def main(_):
             motions.append(out.motion.cpu())
     tau_id = cfg.gates.tau_id if cfg.gates.tau_id >= 0 else percentile_threshold(torch.cat(s_ids), 0.10)
     tau_motion = cfg.gates.tau_motion if cfg.gates.tau_motion >= 0 else percentile_threshold(torch.cat(motions), 0.10)
+    logger.log_event(0, "calibration", {"tau_id": float(tau_id), "tau_motion": float(tau_motion),
+                                        "tau_q": cfg.gates.tau_q})
     print(json.dumps({"tau_id": tau_id, "tau_motion": tau_motion, "tau_q": cfg.gates.tau_q}))
 
     if evaluation_due(0, cfg.num_epochs, cfg.eval_freq):
         # Calibration references are cached on CPU; release its final GPU tensors.
         rec = pe = ne = latents = clip = out = None
         metrics, videos = evaluator.evaluate(pipe, policy, roll_old, reward, judge, 0)
-        _log_record({"optimizer_updates": 0, **metrics}, videos)
+        _log_record({"optimizer_updates": 0, **metrics}, videos, logger=logger)
 
     for epoch in range(cfg.num_epochs):
         batch_prompts = random.sample(prompts, cfg.sample.num_batches_per_epoch)
@@ -280,6 +275,7 @@ def main(_):
                 state = policy.state_dict()
             checkpoint_path = os.path.join(cfg.logdir, f"policy_{epoch + 1}.pt")
             torch.save(state, checkpoint_path)
+            logger.log_event(epoch + 1, "checkpoint", {"path": checkpoint_path})
             print(json.dumps({"checkpoint_saved": checkpoint_path}), flush=True)
             del state
         videos = []
@@ -293,8 +289,7 @@ def main(_):
             y0 = yg = g0 = y_theta = v_theta = loss = None
             metrics, videos = evaluator.evaluate(pipe, policy, roll_old, reward, judge, epoch + 1)
             record.update(metrics)
-        _log_record(record, videos)
-    wandb.finish()
+        _log_record(record, videos, logger=logger)
 
 
 if __name__ == "__main__":
