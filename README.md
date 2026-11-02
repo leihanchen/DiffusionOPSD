@@ -636,3 +636,43 @@ This release builds on Hugging Face [Diffusers](https://github.com/huggingface/d
 ## 📄 License
 
 Released under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for third-party attribution and weight-license boundaries.
+
+## Cosmos3-Nano video OPSD
+
+The Cosmos trainer supports `nvidia/Cosmos3-Nano` text-to-video with native UniPC sampling, intermediate-query capture,
+rank-16 LoRA, the geometry reward, identity/motion/VideoReward gates, and an EMA behavior adapter. It saves both adapters,
+optimizer state, reward statistics, calibration, and RNG for resume. Wan trainers keep their existing sampling behavior.
+The update budget counts successful optimizer steps. Prompts whose clips all fail the identity gate are skipped using a
+persisted sampling cursor; a full pass of consecutive rejected prompts stops with an error instead of looping indefinitely.
+
+Use the existing `containers/diffusionopsd.sif` and local video reward weights. The Cosmos dependency versions are isolated
+in `logs/cosmos-runtime/python`; VideoReward runs in a subprocess on the container's original Transformers stack.
+Do not install these versions over the shared Wan environment.
+
+```bash
+# Login node: create the dependency overlay and download the pinned Nano checkpoint.
+bash scripts/setup_cosmos_nano.sh
+bash scripts/setup_cosmos_nano.sh --check-only
+
+# CPU tests, including a tiny real Cosmos transformer/pipeline integration test.
+OMP_NUM_THREADS=1 bash scripts/run_cosmos_python.sh -m pytest tests/video/test_cosmos* -q
+
+# First run: one real optimizer update plus held-out generation, on two A100s.
+sbatch --partition=gpubase_bygpu_b1 --time=03:00:00 \
+  --export=ALL,COSMOS_MAX_UPDATES=1,COSMOS_RUN_DIR="$PWD/logs/cosmos-nano-first-run" \
+  scripts/train_opsd_video_cosmos.slurm
+
+# After that job succeeds: resume the same configured 50-update training run.
+sbatch --export=ALL,COSMOS_RESUME=1,COSMOS_RUN_DIR="$PWD/logs/cosmos-nano-first-run" \
+  scripts/train_opsd_video_cosmos.slurm
+```
+
+Defaults are in `config/cosmos_nano.py`: 17 frames at 480×832, 35 UniPC steps, guidance 6, flow shift 10, and four clips per
+prompt. Geometry is scored on nine frames resized to 224×384 to control reward memory. The VAE keeps native full-frame decoding; overlapping tiles retain too many saved tensors for target gradients with CPU offload. These are initial training settings;
+the short clips and resolution are not a claim about the model's native-quality recipe. Prompts are wrapped deterministically
+as JSON descriptions; no external prompt-upsample service is used. Audio, action, image-conditioned, quantized, and few-step
+distilled modes are outside this trainer's scope. The native continuation helper restores UniPC history for same-query probes;
+the frozen behavior adapter must remain selected throughout such comparisons.
+
+The implementation plan and validation ledger are in
+[`docs/superpowers/plans/2026-10-30-cosmos-nano-opsd.md`](docs/superpowers/plans/2026-10-30-cosmos-nano-opsd.md).
