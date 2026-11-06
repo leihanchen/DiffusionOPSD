@@ -28,7 +28,7 @@ from diffusionopsd.stat_tracking import PerPromptStatTracker
 from diffusionopsd.video.branch_loss import branch_loss
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
 from diffusionopsd.video.gates import effective_weight, identity_keep, percentile_threshold
-from diffusionopsd.video.geo_reward import GeoReward
+from diffusionopsd.video.geo_reward import GeoReward, configure_reward
 from diffusionopsd.video.opa_video import opa_tr_step_nd
 from diffusionopsd.video.quality_judge import load_video_reward
 from diffusionopsd.video.training_eval import EvaluationMonitor, evaluation_due
@@ -60,6 +60,7 @@ def _log_record(record, videos=(), *, logger):
 
 def main(_):
     cfg = FLAGS.config
+    configure_reward(cfg)
     evaluator = EvaluationMonitor(cfg)  # Validate settings and prompts before loading models.
     os.makedirs(cfg.logdir, exist_ok=True)
     model_id = str(cfg.pretrained.model)

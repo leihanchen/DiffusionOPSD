@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Held-out comparison of a tuned policy against the base model on the same prompts and seeds."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
@@ -19,7 +21,7 @@ for path in (ROOT / "src", ROOT):
 
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
 from diffusionopsd.video.eval_table import success_table
-from diffusionopsd.video.geo_reward import GeoReward
+from diffusionopsd.video.geo_reward import GeoReward, REWARD_VERSION, reward_metadata
 from diffusionopsd.video.quality_judge import load_video_reward
 from diffusionopsd.video.wan_clean_output import WanRollout
 
@@ -109,7 +111,9 @@ def main():
                 acc["tuned"][k].append(float(getattr(ot, k)))
             acc["tuned"]["p_q"].append(judge.p_win(ct[0].to(cfg.judge.device), cb[0].to(cfg.judge.device), prompt))
     means = {s: {k: sum(v) / len(v) for k, v in d.items()} for s, d in acc.items()}
-    result = {"n": len(prompts), "means": means, "success": success_table(means["base"], means["tuned"])}
+    for values in means.values():
+        values["reward_version"] = REWARD_VERSION
+    result = {"reward": reward_metadata(), "n": len(prompts), "means": means, "success": success_table(means["base"], means["tuned"])}
     with open(a.out, "w") as out_f:
         json.dump(result, out_f, indent=2)
     print(json.dumps(result, indent=2))

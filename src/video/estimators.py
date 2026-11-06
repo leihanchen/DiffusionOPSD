@@ -14,7 +14,7 @@ _IMNET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 class DepthOutput(NamedTuple):
     depth: torch.Tensor  # [B,T,H,W]
-    K: torch.Tensor  # [B,3,3]
+    K: torch.Tensor  # [B,T,3,3], or shared [B,3,3] for legacy estimators
     poses: torch.Tensor  # [B,T,4,4] camera-to-world
     conf: torch.Tensor  # [B,T,H,W] in [0,1]
 
@@ -51,10 +51,8 @@ class DinoV2Patches(torch.nn.Module):
 
     def forward(self, imgs: torch.Tensor) -> torch.Tensor:
         B, _, H, W = imgs.shape
-        h, w = H // self.patch, W // self.patch
-        if h == 0 or w == 0:
-            raise ValueError(f"input {H}x{W} smaller than one {self.patch}px patch")
-        x = F.interpolate(imgs, size=(h * self.patch, w * self.patch), mode="bilinear", align_corners=False)
+        h, w = max(1, H // self.patch), max(1, W // self.patch)
+        x = F.interpolate(imgs, size=(h * self.patch, w * self.patch), mode="bilinear", align_corners=False, antialias=True)
         x = (x - _IMNET_MEAN.to(x)) / _IMNET_STD.to(x)
         if hasattr(self.backbone, "forward_features"):
             tok = self.backbone.forward_features(x)["x_norm_patchtokens"]
@@ -78,13 +76,15 @@ def load_dinov2(device) -> PatchFeatureExtractor:
 class WaftFlow(torch.nn.Module):
     """WAFT adapter. Wraps the model object returned by the official WAFT repo (princeton-vl/WAFT)."""
 
-    def __init__(self, model: torch.nn.Module):
+    def __init__(self, model: torch.nn.Module, inference=None):
         super().__init__()
         self.model = model.eval().requires_grad_(False)
+        self.inference = inference
 
     def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         # Official a1 ViTWarpV8 consumes images in [0,255] and returns {"flow": [pred, ...]}.
-        out = self.model(a * 255.0, b * 255.0)
+        predict = self.inference.calc_flow if self.inference is not None else self.model
+        out = predict(a * 255.0, b * 255.0)
         if isinstance(out, dict):
             flow = out["flow"][-1]
         elif isinstance(out, (list, tuple)):
@@ -105,17 +105,19 @@ def _waft_state_dict(sd):
 def load_waft(device) -> FlowEstimator:
     import sys
 
-    root = os.path.join(_ckpt_root(), "WAFT")
+    root = os.environ.get("GEOFLOW_WAFT_DIR", os.path.join(_ckpt_root(), "WAFT"))
+    _require_revision(root, "b152ff1cad1af8c185ee7b141997c48ff3334c87", "GEOFLOW_WAFT_DIR")
     if root not in sys.path:
         sys.path.insert(0, root)
     # a1 code resolves depth-anything-ckpts/ relative to the WAFT checkout.
-    from config.parser import json_to_args
+    import argparse
+    import json
     from model import fetch_model
+    from inference_tools import InferenceWrapper
 
-    cfg = os.path.join(root, "config", "tar-c-t.json")
-    if not os.path.isfile(cfg):
-        cfg = os.path.join(root, "config", "a1", "tar-c-t.json")
-    args = json_to_args(cfg)
+    cfg = os.path.join(root, "config", "a1", "tar-c-t.json")
+    with open(cfg) as handle:
+        args = argparse.Namespace(**json.load(handle))
     previous = os.getcwd()
     os.chdir(root)
     try:
@@ -130,7 +132,10 @@ def load_waft(device) -> FlowEstimator:
     result = model.load_state_dict(_waft_state_dict(sd), strict=False)
     if result.missing_keys:
         raise RuntimeError(f"WAFT checkpoint is missing {len(result.missing_keys)} keys: {result.missing_keys[:5]}...")
-    return WaftFlow(model).to(device)
+    model = model.to(device).eval()
+    inference = InferenceWrapper(model, scale=0, train_size=args.image_size,
+                                 pad_to_train_size=False, tiling=False)
+    return WaftFlow(model, inference).to(device)
 
 
 def _uint8_frames(clip: torch.Tensor) -> list:
@@ -161,11 +166,12 @@ def _scale_intrinsics(K: torch.Tensor, src_hw: tuple[int, int], dst_hw: tuple[in
 class DepthAnything3(torch.nn.Module):
     """Depth Anything 3 adapter. Wraps the official inference model (ByteDance-Seed/Depth-Anything-3)."""
 
-    def __init__(self, model: torch.nn.Module, process_res: int | None = None):
+    def __init__(self, model: torch.nn.Module, process_res: int = 504):
         super().__init__()
         self.model = model.eval().requires_grad_(False)
         self.process_res = process_res
 
+    @torch.no_grad()
     def forward(self, frames01: torch.Tensor) -> DepthOutput:
         B, T, _, H, W = frames01.shape
         # One clip at a time so unrelated videos never share a scene.
@@ -173,9 +179,7 @@ class DepthAnything3(torch.nn.Module):
         # Its extrinsics are world-to-camera; rigid_flow needs camera-to-world.
         depths, confs, Ks, poses_list = [], [], [], []
         for b in range(B):
-            kwargs = {}
-            if self.process_res is not None:
-                kwargs["process_res"] = self.process_res
+            kwargs = dict(process_res=self.process_res, process_res_method="upper_bound_resize", export_dir=None)
             pred = self.model.inference(_uint8_frames(frames01[b]), **kwargs)
             depth = torch.as_tensor(pred.depth, device=frames01.device, dtype=torch.float32)
             if depth.ndim == 4:
@@ -190,11 +194,17 @@ class DepthAnything3(torch.nn.Module):
                 if conf_t.ndim == 4:
                     conf_t = conf_t[..., 0]
             src_hw = (int(depth.shape[-2]), int(depth.shape[-1]))
-            depths.append(_resize_map(depth, H, W))
-            confs.append(_resize_map(conf_t, H, W).clamp(0, 1))
+            processed_h, processed_w = (src_hw[0] // 8) * 8, (src_hw[1] // 8) * 8
+            if min(processed_h, processed_w) < 8:
+                raise ValueError("DA3 output must be at least 8 pixels on each axis")
+            depths.append(_resize_map(depth, processed_h, processed_w))
+            confs.append(_resize_map(conf_t, processed_h, processed_w).clamp(0, 1))
             intrinsics = torch.as_tensor(pred.intrinsics, device=frames01.device, dtype=torch.float32)
-            Ks.append(_scale_intrinsics(intrinsics[0], src_hw, (H, W)))
-            w2c = torch.as_tensor(pred.extrinsics, device=frames01.device, dtype=torch.float32)
+            intrinsics = intrinsics.clone()
+            intrinsics[:, 0, :] *= processed_w / src_hw[1]
+            intrinsics[:, 1, :] *= processed_h / src_hw[0]
+            Ks.append(intrinsics)
+            w2c = torch.as_tensor(pred.extrinsics, device=frames01.device, dtype=torch.float64)
             if w2c.shape == (T, 3, 4):
                 homogeneous = torch.eye(4, device=w2c.device, dtype=w2c.dtype).expand(T, -1, -1).clone()
                 homogeneous[:, :3] = w2c
@@ -212,7 +222,29 @@ class DepthAnything3(torch.nn.Module):
         )
 
 
+def _require_revision(root, expected, variable):
+    import subprocess
+
+    try:
+        actual = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                         text=True, stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.CalledProcessError):
+        actual = "unverified"
+    if actual != expected:
+        raise RuntimeError(f"GeoFlow requires {expected}, found {actual} at {root}. "
+                           f"Set {variable} to the pinned source checkout; see docs/geoflow_reward.md")
+
+
 def load_depth_anything3(device) -> DepthEstimator:
+    import sys
+    from pathlib import Path
+
+    root = os.environ.get("GEOFLOW_DA3_DIR")
+    if root:
+        sys.path.insert(0, str(Path(root) / "src"))
+    from depth_anything_3 import api as da3_api
+    _require_revision(Path(da3_api.__file__).parent,
+                      "2c21ea849ceec7b469a3e62ea0c0e270afc3281a", "GEOFLOW_DA3_DIR")
     from depth_anything_3.api import DepthAnything3 as DA3
 
     path = os.path.join(_ckpt_root(), "depth-anything-3-large-v1.1")

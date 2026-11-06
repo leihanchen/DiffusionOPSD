@@ -4,6 +4,8 @@ from __future__ import annotations
 
 
 def success_table(base: dict, tuned: dict) -> dict:
+    if base.get("reward_version", "legacy") != tuned.get("reward_version", "legacy"):
+        raise ValueError("Cannot compare different reward versions; rescore both policies with the same reward")
     t = {
         "geometry_up": tuned["geo"] > base["geo"],
         "identity_ok": tuned["s_id"] >= base["s_id"] - 0.02,
