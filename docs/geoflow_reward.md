@@ -102,5 +102,17 @@ reward versions identify legacy results. Cross-version success comparisons
 raise an error and require rescoring. Resume config validation prevents mixing
 old reward calibration and new reward training state.
 
-Real-model numerical parity and Wan/Cosmos GPU updates must be verified in the
-training environment before treating this change as validated for production.
+Real-model scoring checks passed on 2-, 9-, and 17-frame clips with shared DA3
+and WAFT outputs. Job 8621484 also verified finite latent gradients through the
+VAE and one adapter optimizer update for each backbone at 17 frames, 256×384,
+with nine reward frames at 224×384. Fitting took 41.90 seconds for Wan and 56.19
+seconds for Cosmos. Peak policy/reward/VAE allocations were 20.91/5.70/3.61 GiB
+and 28.63/5.70/3.61 GiB respectively. This smoke test uses a fixed branch weight;
+full-resolution memory, complete training-loop behavior, and video-quality gains
+remain unmeasured.
+
+Submit the integration smoke check from the repository root with
+`sbatch scripts/check_video_reward_update.slurm`. Set `GEOFLOW_ASSET_ROOT` if
+weights, the container, and the isolated Cosmos runtime live in another checkout.
+The batch script uses the Narval filesystem layout and the pinned reference
+checkout documented above.
