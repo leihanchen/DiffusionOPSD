@@ -24,7 +24,7 @@ from diffusionopsd.video.geo_reward import GeoReward, GEOFLOW_REVISION, quantize
 from diffusionopsd.video.opa_video import opa_tr_step_nd
 
 
-def reference_score(reference, reward, clip):
+def reference_score(reference, reward, clip, da3_prediction=None, flow_prediction=None):
     """Run the original server with the same loaded backbones and decoded RGB8."""
     import inspect
     import subprocess
@@ -45,7 +45,11 @@ def reference_score(reference, reward, clip):
             setattr(worker, name, parameter.default)
     worker.device = str(clip.device)
     worker.torch, worker.TF, worker.TVF = torch, F, TVF
-    worker._da3, worker._flow = reward.depth.model, reward.flow.inference
+    worker._da3 = (SimpleNamespace(inference=lambda *args, **kwargs: da3_prediction)
+                   if da3_prediction is not None else reward.depth.model)
+    worker._flow = reward.flow.inference
+    if flow_prediction is not None:
+        worker._waft_flow_batch = lambda *args: flow_prediction
     worker._dino = SimpleNamespace(
         patch_size=reward.feats.patch, model=reward.feats.backbone,
         mean=torch.tensor([0.485, 0.456, 0.406], device=clip.device).view(3, 1, 1),
@@ -74,21 +78,51 @@ def main():
     if a.device.startswith("cuda"):
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
+    da3_prediction = None
+    flow_predictions = []
+    original_inference = reward.depth.model.inference
+    original_flow = reward.flow.forward
+
+    def capture_inference(*args, **kwargs):
+        nonlocal da3_prediction
+        da3_prediction = original_inference(*args, **kwargs)
+        return da3_prediction
+
+    if a.reference:
+        reward.depth.model.inference = capture_inference
+
+        def capture_flow(*args, **kwargs):
+            flow = original_flow(*args, **kwargs)
+            flow_predictions.append(flow.detach())
+            return flow
+
+        reward.flow.forward = capture_flow
     started = time.perf_counter()
     out = reward(clip)
+    # Checkpointing replays pairs during backward; retain only the first forward's adjacent flows.
+    flow_prediction = torch.cat(flow_predictions, dim=0) if a.reference else None
+    if a.reference and flow_prediction.shape[0] != clip.shape[1] - 1:
+        raise RuntimeError(f"Captured {flow_prediction.shape[0]} flows for {clip.shape[1]} frames")
+    if a.reference:
+        reward.flow.forward = original_flow
+        reward.depth.model.inference = original_inference
     (g,) = torch.autograd.grad(out.geo.sum(), clip)
     if a.device.startswith("cuda"):
         torch.cuda.synchronize()
     gradient_seconds = time.perf_counter() - started
     parity = None
     if a.reference:
-        reference = reference_score(a.reference, reward, clip)
+        reference = reference_score(a.reference, reward, clip, da3_prediction, flow_prediction)
         parity = {}
         for field, ref_field in (("geo", "score"), ("rigid", "mean_r_geo"), ("dino", "mean_r_dino")):
             value = getattr(out, field).detach().cpu()
             expected = torch.tensor([reference[ref_field]])
-            torch.testing.assert_close(value, expected, atol=1e-5, rtol=1e-4)
-            parity[field] = float((value - expected).abs().max())
+            parity[field] = {"ours": float(value), "reference": float(expected),
+                             "absolute_error": float((value - expected).abs().max())}
+        print(json.dumps({"parity": parity}), flush=True)
+        for field, ref_field in (("geo", "score"), ("rigid", "mean_r_geo"), ("dino", "mean_r_dino")):
+            torch.testing.assert_close(getattr(out, field).detach().cpu(),
+                                       torch.tensor([reference[ref_field]]), atol=1e-5, rtol=1e-4)
     started = time.perf_counter()
     for direction in (1, -1):
         target = opa_tr_step_nd(clip.detach(), lambda x: reward(x).geo, rho=0.01, n_ascent=2,

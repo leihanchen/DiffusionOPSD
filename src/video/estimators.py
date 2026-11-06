@@ -94,48 +94,23 @@ class WaftFlow(torch.nn.Module):
         return flow.float()
 
 
-def _waft_state_dict(sd):
-    if isinstance(sd, dict) and "model" in sd and isinstance(sd["model"], dict):
-        sd = sd["model"]
-    elif isinstance(sd, dict) and "state_dict" in sd and isinstance(sd["state_dict"], dict):
-        sd = sd["state_dict"]
-    return {(k[len("module.") :] if k.startswith("module.") else k): v for k, v in sd.items()}
-
-
 def load_waft(device) -> FlowEstimator:
     import sys
+    from pathlib import Path
 
     root = os.environ.get("GEOFLOW_WAFT_DIR", os.path.join(_ckpt_root(), "WAFT"))
     _require_revision(root, "b152ff1cad1af8c185ee7b141997c48ff3334c87", "GEOFLOW_WAFT_DIR")
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    # a1 code resolves depth-anything-ckpts/ relative to the WAFT checkout.
-    import argparse
-    import json
-    from model import fetch_model
-    from inference_tools import InferenceWrapper
+    reference = Path(root).resolve().parents[1]
+    if not (reference / "geoflow" / "waft_loader.py").is_file():
+        raise FileNotFoundError(f"GeoFlow WAFT loader missing under {reference}; see docs/geoflow_reward.md")
+    if str(reference) not in sys.path:
+        sys.path.insert(0, str(reference))
+    from geoflow.waft_loader import load_waft as load_reference_waft
 
     cfg = os.path.join(root, "config", "a1", "tar-c-t.json")
-    with open(cfg) as handle:
-        args = argparse.Namespace(**json.load(handle))
-    previous = os.getcwd()
-    os.chdir(root)
-    try:
-        model = fetch_model(args)
-    finally:
-        os.chdir(previous)
     ckpt = os.path.join(_ckpt_root(), "waft_tar_c_t.pth")
-    try:
-        sd = torch.load(ckpt, map_location="cpu", weights_only=True)
-    except Exception:
-        sd = torch.load(ckpt, map_location="cpu", weights_only=False)
-    result = model.load_state_dict(_waft_state_dict(sd), strict=False)
-    if result.missing_keys:
-        raise RuntimeError(f"WAFT checkpoint is missing {len(result.missing_keys)} keys: {result.missing_keys[:5]}...")
-    model = model.to(device).eval()
-    inference = InferenceWrapper(model, scale=0, train_size=args.image_size,
-                                 pad_to_train_size=False, tiling=False)
-    return WaftFlow(model, inference).to(device)
+    inference = load_reference_waft(cfg, ckpt, torch.device(device))
+    return WaftFlow(inference.model, inference).to(device)
 
 
 def _uint8_frames(clip: torch.Tensor) -> list:

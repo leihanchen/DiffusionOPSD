@@ -89,9 +89,11 @@ python scripts/check_video_reward_setup.py --device cuda --frames 17 --reference
 
 The CPU parity tests execute pure functions and the complete original
 `score_video` method with identical stub estimator outputs, checking components
-and final aggregation at `atol=1e-5, rtol=1e-4`. The real-estimator command uses
-shared loaded backbones, compares against the original server, checks gradients
-and both target directions, and reports elapsed time and peak GPU memory.
+and final aggregation at `atol=1e-5, rtol=1e-4`. The real-estimator command captures
+one DA3 prediction and the adjacent WAFT flows, supplies those same outputs to
+both scorers, checks gradients and both target directions, and reports elapsed
+time and peak GPU memory. Its numerical parity result is conditional on shared
+estimator outputs; separate estimator runs may differ.
 Use `--clip-tensor /path/to/clip.pt` for a fixed decoded RGB clip.
 
 Wan and Cosmos config/checkpoint metadata includes `geometry_reward.version`
