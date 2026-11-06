@@ -1,9 +1,11 @@
 import ml_collections
+from diffusionopsd.video.geo_reward import reward_metadata
 from config.base import get_config as base_config
 
 
 def get_config():
     config = base_config()
+    config.geometry_reward = ml_collections.ConfigDict(reward_metadata())
     config.pretrained.model = "${VIDEO_REWARD_CKPT_PATH}/Wan2.1-T2V-1.3B-Diffusers"
     config.resolution = 480
     config.video = video = ml_collections.ConfigDict()

@@ -1,10 +1,12 @@
 """Native-UniPC Cosmos3-Nano video OPSD defaults for one two-GPU worker."""
 
 import ml_collections
+from diffusionopsd.video.geo_reward import reward_metadata
 
 
 def get_config():
     return ml_collections.ConfigDict(dict(
+        geometry_reward=reward_metadata(),
         model="${VIDEO_REWARD_CKPT_PATH}/Cosmos3-Nano",
         model_id="nvidia/Cosmos3-Nano",
         model_revision="e59a53c25979a090fa8706c9acc0c254a6e89b92",

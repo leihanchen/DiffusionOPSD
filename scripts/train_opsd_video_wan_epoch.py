@@ -52,7 +52,7 @@ from diffusionopsd.video.distributed_epoch import (
 from scripts.wan_paths import portable_path, portable_reference_files, resolve_reference_files
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
 from diffusionopsd.video.gates import effective_weight, identity_keep, percentile_threshold
-from diffusionopsd.video.geo_reward import GeoReward
+from diffusionopsd.video.geo_reward import GeoReward, configure_reward
 from diffusionopsd.video.opa_video import opa_tr_step_nd
 from diffusionopsd.video.quality_judge import load_video_reward
 from diffusionopsd.video.training_eval import EvaluationMonitor, evaluation_due
@@ -288,6 +288,7 @@ def _targets_and_gradients(tuples, weights, roll, reward, policy, opt, cfg, tau_
 
 def main(_):
     cfg = FLAGS.config
+    configure_reward(cfg)
     if FLAGS.max_updates_this_job < 0 or FLAGS.distributed_timeout_minutes <= 0:
         raise ValueError("Update limit must be nonnegative and distributed timeout must be positive")
     if FLAGS.monitor_eval_freq < 0 or FLAGS.expected_resume_update < -1:

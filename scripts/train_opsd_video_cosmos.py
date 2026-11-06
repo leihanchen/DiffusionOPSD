@@ -33,7 +33,7 @@ from diffusionopsd.video.cosmos_training import (
 )
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
 from diffusionopsd.video.gates import effective_weight
-from diffusionopsd.video.geo_reward import GeoReward
+from diffusionopsd.video.geo_reward import GeoReward, configure_reward
 from diffusionopsd.video.quality_judge import gap_to_probability, quality_gap
 from diffusionopsd.video.training_eval import evaluation_due, save_video
 from diffusionopsd.video.training_logging import VideoTrainingLogger, evaluation_metrics
@@ -119,6 +119,7 @@ def main():
     if args.max_updates_this_job < 0:
         parser.error("max-updates-this-job must be nonnegative")
     cfg = read_config(args.config)
+    configure_reward(cfg)
     validate_config(cfg)
     model_path, versions = preflight(cfg)
     if args.preflight:

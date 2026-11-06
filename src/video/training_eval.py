@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from diffusionopsd.video.eval_table import success_table
+from diffusionopsd.video.geo_reward import REWARD_VERSION, reward_metadata
 from diffusionopsd.video.quality_judge import gap_to_probability, quality_gap
 from diffusionopsd.video.wan_geometry import latent_shape_from_pipe
 
@@ -109,7 +110,7 @@ class EvaluationMonitor:
                 clip = generate_clip(pipe, roll, cfg, prompt, seed, device)
                 geometry = reward(clip.to(cfg.reward_device))
                 scores = judge.score(clip[0].to(cfg.judge.device), prompt)
-                row = {"prompt": prompt, "seed": seed}
+                row = {"prompt": prompt, "seed": seed, "reward_version": REWARD_VERSION}
                 row.update({key: float(getattr(geometry, key)) for key in ("geo", "s_id", "motion")})
                 row.update({key: float(scores[key]) for key in ("VQ", "MQ", "TA", "Overall")})
                 reference = row if self.baseline is None else self.baseline[index]
@@ -124,6 +125,8 @@ class EvaluationMonitor:
         keys = ("geo", "s_id", "motion", "VQ", "MQ", "TA", "Overall", "p_q")
         means = {key: sum(row[key] for row in rows) / len(rows) for key in keys}
         base_means = {key: sum(row[key] for row in baseline) / len(baseline) for key in keys}
+        base_means["reward_version"] = baseline[0].get("reward_version", "legacy")
+        means["reward_version"] = REWARD_VERSION
         success = success_table(base_means, means)
         metrics = {f"eval/{key}": value for key, value in means.items()}
         metrics.update({f"eval/{key}_delta": means[key] - base_means[key] for key in keys})
@@ -137,6 +140,7 @@ class EvaluationMonitor:
                 metrics[f"eval/prompt_{index}/{label}"] = row[key]
                 metrics[f"eval/prompt_{index}/{label}_delta"] = row[key] - base[key]
         result = {
+            "reward": reward_metadata(),
             "optimizer_updates": update,
             "prompts": rows,
             "means": means,

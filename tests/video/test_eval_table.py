@@ -15,3 +15,11 @@ def test_success_table_thresholds():
     frozen = dict(ok, motion=3.0)
     assert success_table(base, frozen)["not_frozen"] is False
     assert success_table(base, frozen)["all_pass"] is False
+
+
+def test_reward_versions_prevent_cross_objective_comparisons():
+    import pytest
+    base = dict(geo=-0.3, s_id=0.8, motion=4)
+    tuned = dict(geo=-0.2, s_id=0.8, motion=4, p_q=0.5, reward_version="geoflow-server")
+    with pytest.raises(ValueError, match="reward"):
+        success_table(base, tuned)
