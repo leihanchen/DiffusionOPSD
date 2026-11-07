@@ -1,0 +1,31 @@
+{
+  "format_version": 1,
+  "recipe_sha256": "a90ac225013d344f316f7703256fe3ba29698ce26ce02788c95ee9b340945ea0",
+  "shared_videorepa_rows": 31346,
+  "configurations": {
+    "videogpa": {
+      "rows": 3147,
+      "content_sha256": "a0eb6f59d1042c282cb03329c0ea7ad8ead0df40df7e89493bd5aab596eba344"
+    },
+    "videorepa_32k": {
+      "rows": 32000,
+      "content_sha256": "779b95d2c963ac824c1fa75b4185bb4b5ae3fa4ee67772ee20a9ceb48018c94a"
+    },
+    "videorepa_64k": {
+      "rows": 64000,
+      "content_sha256": "1019b02572b956f121e3203775c83ba821986fb9e324c3c3fbd9373828bb426f"
+    },
+    "combined": {
+      "rows": 67801,
+      "content_sha256": "b2b446564b0ee4117363d56c98c1e21edbb0206d1af5d54daebdbba04e434aec"
+    }
+  },
+  "files": {
+    "README.md": "d85293c0f6957a7cefcab42082de8b05f76eeb3ca97ea6c9afbad8da85ffd659",
+    "data/combined.parquet": "2261c32551870b6a6fb7de7d9ee59a4a15d55c6ff8d374cdcfc29811dbb5f0d4",
+    "data/videogpa.parquet": "33319b46952043b050bc2c924511d05b4051df7d4fa7f42a416f4b7d82dfaa6a",
+    "data/videorepa_32k.parquet": "a800d1f075481cb9e251fcb8e070f434ad1c7a219e8b3be0d9ccd38f2ad93c79",
+    "data/videorepa_64k.parquet": "9f3ff513ffc136c61de23c4ac5253a8b9bcd0ff7a42e966db8c247e79fcbde73",
+    "sources.json": "a90ac225013d344f316f7703256fe3ba29698ce26ce02788c95ee9b340945ea0"
+  }
+}
