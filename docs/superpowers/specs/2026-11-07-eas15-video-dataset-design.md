@@ -6,7 +6,7 @@ Updated November 7, 2026 following the user's simplified scope. “VideoGPT” i
 
 Collect VideoGPA's 3,147 released training captions and both exact VideoREPA training selections, 32K and 64K. Publish one Hugging Face dataset repository under `cvis-tmu`, with string columns `text` and `video_source`. Deliver the reproducible preparation/upload script and a draft PR linked to [EAS-15](https://linear.app/cvis-tmu/issue/EAS-15/create-new-training-dataset-with-videogpa-and-videorepa).
 
-Proposed dataset ID is `cvis-tmu/VideoGPA-VideoREPA`. Use a single `train` split and four named configurations so the exact upstream selections remain accessible.
+Dataset ID is `cvis-tmu/VideoGPA-VideoREPA`. Use a single `train` split and four named configurations so the exact upstream selections remain accessible.
 
 | Configuration | Rows | Content |
 | --- | --- | --- |
@@ -51,3 +51,7 @@ Full files fetched successfully on November 7, 2026. The two VideoREPA selection
 | VideoGPA `captions_11K.json` | 498 | `b7e29128eb65e1ce81a4b007eca42f745204bb4f79d8ca79e7787c7b894eb7af` |
 | VideoREPA `openvid_3w2.csv` | 32,000 | `7c116ee8363cb3506896be698b839b280bcdd4386c2ab1c3f73a9a3478231eb8` |
 | VideoREPA `openvid_6w4.csv` | 64,000 | `7b088e3b5a76c0156967926492cc53d107f579f6fe01e2a6180337239c974956` |
+
+## Published release
+
+Published [cvis-tmu/VideoGPA-VideoREPA](https://huggingface.co/datasets/cvis-tmu/VideoGPA-VideoREPA) at commit `95f93059b25b2fbe4759d8e6be3aa36b30e85b62`. All configurations and the default combined view were reloaded and verified against the complete local release. Independent source-to-Parquet equality and an offline second-build hash comparison passed.

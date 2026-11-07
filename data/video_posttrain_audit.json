@@ -27,5 +27,18 @@
     "data/videorepa_32k.parquet": "a800d1f075481cb9e251fcb8e070f434ad1c7a219e8b3be0d9ccd38f2ad93c79",
     "data/videorepa_64k.parquet": "9f3ff513ffc136c61de23c4ac5253a8b9bcd0ff7a42e966db8c247e79fcbde73",
     "sources.json": "a90ac225013d344f316f7703256fe3ba29698ce26ce02788c95ee9b340945ea0"
+  },
+  "publication": {
+    "repo_id": "cvis-tmu/VideoGPA-VideoREPA",
+    "url": "https://huggingface.co/datasets/cvis-tmu/VideoGPA-VideoREPA",
+    "revision": "95f93059b25b2fbe4759d8e6be3aa36b30e85b62",
+    "verified_configurations": [
+      "videogpa",
+      "videorepa_32k",
+      "videorepa_64k",
+      "combined"
+    ],
+    "default_configuration": "combined",
+    "verification": "Complete ordered row equality against verified local Parquet for all configurations and default; source-to-Parquet equality checked independently."
   }
 }

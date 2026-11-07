@@ -30,29 +30,29 @@
 
 ## Task 1 — Collect the exact sources
 
-- [ ] Download VideoGPA's four training caption JSONs at commit `91356baa923e2f6f6991e3f3377fa1b60cc441da`.
-- [ ] Download VideoREPA's `openvid_3w2.csv` and `openvid_6w4.csv` at commit `8d581dc301e18546a1808436c724f59d259d09f9`.
-- [ ] Verify complete-file hashes against the design's audit. Require 3,147 VideoGPA rows, 32,000 smaller-selection rows and 64,000 larger-selection rows.
-- [ ] Record source provenance and upstream usage terms in the recipe and dataset card.
+- [x] Download VideoGPA's four training caption JSONs at commit `91356baa923e2f6f6991e3f3377fa1b60cc441da`.
+- [x] Download VideoREPA's `openvid_3w2.csv` and `openvid_6w4.csv` at commit `8d581dc301e18546a1808436c724f59d259d09f9`.
+- [x] Verify complete-file hashes against the design's audit. Require 3,147 VideoGPA rows, 32,000 smaller-selection rows and 64,000 larger-selection rows.
+- [x] Record source provenance and upstream usage terms in the recipe and dataset card.
 
 ## Task 2 — Build and verify the HF dataset
 
 **CLI:** `python scripts/prepare_video_posttrain_dataset.py --output data/video_posttrain/generated`. Add `--offline` for verified cached sources and `--repo-id cvis-tmu/VideoGPA-VideoREPA --push-to-hub` for publication.
 
-- [ ] Add fixture tests for exact text preservation, JSON/CSV field mapping, valid relative paths, invalid schemas and corrupted cached input.
-- [ ] Add overlap tests proving source configurations preserve their rows, shared VideoREPA rows appear once in `combined`, and different source videos with identical captions remain distinct.
-- [ ] Implement deterministic conversion with exactly `text` and `video_source` string columns. Export one Parquet per configuration and declare each configuration's single `train` split in the card.
-- [ ] Verify full outputs have 3,147 / 32,000 / 64,000 / 67,801 rows for `videogpa` / `videorepa_32k` / `videorepa_64k` / `combined` respectively. Require 31,346 shared VideoREPA rows.
-- [ ] Rebuild offline and compare row content and hashes. Record aggregate results and a small manual path/text audit.
-- [ ] Run focused pytest and Ruff. Commit the implementation and documentation.
+- [x] Add fixture tests for exact text preservation, JSON/CSV field mapping, valid relative paths, invalid schemas and corrupted cached input.
+- [x] Add overlap tests proving source configurations preserve their rows, shared VideoREPA rows appear once in `combined`, and different source videos with identical captions remain distinct.
+- [x] Implement deterministic conversion with exactly `text` and `video_source` string columns. Export one Parquet per configuration and declare each configuration's single `train` split in the card.
+- [x] Verify full outputs have 3,147 / 32,000 / 64,000 / 67,801 rows for `videogpa` / `videorepa_32k` / `videorepa_64k` / `combined` respectively. Require 31,346 shared VideoREPA rows.
+- [x] Rebuild offline and compare row content and hashes. Record aggregate results and a small manual path/text audit.
+- [x] Run focused pytest and Ruff. Commit the implementation and documentation.
 
 ## Task 3 — Publish, reload and propose the PR
 
-- [ ] Check the authenticated HF account can publish under `cvis-tmu`, and check the target repository for existing content before making changes.
-- [ ] Upload all four Parquet configurations and the dataset card as one dataset commit. Set `combined` as default. Record the returned repository URL and commit SHA.
-- [ ] Reload all configurations from that SHA with `datasets.load_dataset`, checking schema, count and complete row equality against the local release.
-- [ ] Document `load_dataset("cvis-tmu/VideoGPA-VideoREPA", "combined", split="train")` plus the exact-source configuration names and path resolution examples.
-- [ ] Inspect the final Git diff and ensure only code, source recipe, aggregate audit and documentation are staged. Push the EAS-15 branch and open a draft PR against `main` in `leihanchen/DiffusionOPSD` titled `feat(data): publish combined VideoGPA and VideoREPA dataset`.
+- [x] Check the authenticated HF account can publish under `cvis-tmu`, and check the target repository for existing content before making changes.
+- [x] Upload all four Parquet configurations and the dataset card as one dataset commit. Set `combined` as default. Record the returned repository URL and commit SHA.
+- [x] Reload all configurations from that SHA with `datasets.load_dataset`, checking schema, count and complete row equality against the local release.
+- [x] Document `load_dataset("cvis-tmu/VideoGPA-VideoREPA", "combined", split="train")` plus the exact-source configuration names and path resolution examples.
+- [x] Inspect the final Git diff and ensure only code, source recipe, aggregate audit and documentation are staged. Push the EAS-15 branch and open a draft PR against `main` in `leihanchen/DiffusionOPSD` titled `feat(data): publish combined VideoGPA and VideoREPA dataset`.
 - [ ] Link EAS-15 and the published dataset. Report exact counts, overlap policy, source hashes, HF revision, tests and any access or path-resolution limitations.
 
 ## Acceptance
