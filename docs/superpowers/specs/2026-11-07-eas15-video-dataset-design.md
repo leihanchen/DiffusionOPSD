@@ -9,8 +9,8 @@ Prepare reproducible VideoGPA and VideoREPA caption datasets for online Wan/Cosm
 ## Current evidence
 
 - Worktree `/lustre06/project/6062393/leihan/DiffusionOPSD-eas15-dataset`, branch `codex/eas-15-video-training-dataset`, based on committed main `389fb8904b1f51ddcc785bf8c5726c4e22adcdec`.
-- VideoGPA reference `Hongyang-Du/VideoGPA@91356baa923e2f6f6991e3f3377fa1b60cc441da`. JSON maps scene/frame paths to captions. Prior counts total 3,147 training-source entries and 1,000 evaluation-source entries. Recount and hash complete downloads during implementation.
-- VideoREPA reference `aHapBean/VideoREPA@8d581dc301e18546a1808436c724f59d259d09f9`. Both subset CSVs are public under `finetune/openvid/`. A fresh header check confirms `video,caption,seconds` for the 32K manifest. Audit both complete files before assigning exact counts.
+- VideoGPA reference `Hongyang-Du/VideoGPA@91356baa923e2f6f6991e3f3377fa1b60cc441da`. JSON maps scene/frame paths to captions. Complete downloads confirm 3,147 training-source entries and 1,000 evaluation-source entries, each with a distinct scene ID. No scene or normalized-text overlap was found between these source splits.
+- VideoREPA reference `aHapBean/VideoREPA@8d581dc301e18546a1808436c724f59d259d09f9`. Complete downloads confirm 32,000 and 64,000 rows. Whitespace-normalized, case-folded caption counts are 31,973 and 63,929 respectively. Columns are `video,caption,seconds`. These are raw audit counts before the proposed NFKC normalization, quality filters and scene grouping.
 - VideoREPA's 32K/64K figures describe two selections from OpenVid. Audit their overlap and choose one, avoiding double-counting their union by default.
 - Both sources contain descriptive captions with static scenes and repetitive language. Automatic rewrite would change the data and require a separately versioned generation recipe.
 - Wan uses `prompt_fn_kwargs.path` and `eval_prompts`. Cosmos uses `train_prompts` and `eval_prompts`. The Wan epoch entry point also hardcodes 200 prompts, 50 updates, and evaluation every 25 updates. Its scheduler processes four logical prompts per update.
@@ -62,4 +62,18 @@ Open a draft PR against originating `main` in `leihanchen/DiffusionOPSD`, titled
 
 ## Review decisions
 
-The author proposes the 32K default, full accepted source union, filtering thresholds, seed 42, component-level 90/5/5 split, and opt-in training presets. These are proposed implementation choices for the user to review. Exact source counts and hashes remain to be measured in implementation.
+The author proposes the 32K default, full accepted source union, filtering thresholds, seed 42, component-level 90/5/5 split, and opt-in training presets. These are proposed implementation choices for the user to review. Final accepted counts and release hashes remain to be measured in implementation.
+
+## Complete input audit
+
+Full files fetched successfully on November 7, 2026. The two VideoREPA selections share 31,346 video filenames. The smaller selection contains 654 filenames absent from the larger selection, so it is not a strict subset. Keep variants distinct and measure overlap by original-video group during implementation too.
+
+| Input file | Raw rows | SHA-256 |
+| --- | --- | --- |
+| VideoGPA `captions_1K.json` | 1,000 | `e965cc30e05c89cfa6bc6a591c0547073b68ee3c62b3138519538f76a51c2d4e` |
+| VideoGPA `captions_8K.json` | 840 | `e24750d337d5f04a3f5d74926ff95ffb576f2bcf503281d2997a415a6ee47bd8` |
+| VideoGPA `captions_9K.json` | 900 | `9fe07d253dd0f57890730a7b45c9fe96e1154fbabec8a5d633eb99db7bdde720` |
+| VideoGPA `captions_10K.json` | 909 | `7c14c085ad0a986edaf8a88dbe859fe4920f09585f785d9a199d2593098a76b1` |
+| VideoGPA `captions_11K.json` | 498 | `b7e29128eb65e1ce81a4b007eca42f745204bb4f79d8ca79e7787c7b894eb7af` |
+| VideoREPA `openvid_3w2.csv` | 32,000 | `7c116ee8363cb3506896be698b839b280bcdd4386c2ab1c3f73a9a3478231eb8` |
+| VideoREPA `openvid_6w4.csv` | 64,000 | `7b088e3b5a76c0156967926492cc53d107f579f6fe01e2a6180337239c974956` |
