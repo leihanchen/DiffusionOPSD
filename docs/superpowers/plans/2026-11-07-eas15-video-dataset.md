@@ -53,8 +53,14 @@
 - [x] Reload all configurations from that SHA with `datasets.load_dataset`, checking schema, count and complete row equality against the local release.
 - [x] Document `load_dataset("cvis-tmu/VideoGPA-VideoREPA", "combined", split="train")` plus the exact-source configuration names and path resolution examples.
 - [x] Inspect the final Git diff and ensure only code, source recipe, aggregate audit and documentation are staged. Push the EAS-15 branch and open a draft PR against `main` in `leihanchen/DiffusionOPSD` titled `feat(data): publish combined VideoGPA and VideoREPA dataset`.
-- [ ] Link EAS-15 and the published dataset. Report exact counts, overlap policy, source hashes, HF revision, tests and any access or path-resolution limitations.
+- [x] Link EAS-15 and the published dataset. Report exact counts, overlap policy, source hashes, HF revision, tests and any access or path-resolution limitations.
 
 ## Acceptance
 
 The published dataset reloads at a pinned HF revision with exactly two string columns and the verified row counts above. The source configurations reproduce upstream training selections. The combined configuration contains their exact-row union. The repository contains reproducible preparation/publication code, and a draft PR is available for review.
+
+## Delivery
+
+Published [cvis-tmu/VideoGPA-VideoREPA](https://huggingface.co/datasets/cvis-tmu/VideoGPA-VideoREPA) at `95f93059b25b2fbe4759d8e6be3aa36b30e85b62`. All configuration and default-view row comparisons passed. Public anonymous access was verified. Full video suite passed 242 tests with two dependency warnings, and focused Ruff passed.
+
+Draft [PR 5](https://github.com/leihanchen/DiffusionOPSD/pull/5) targets `main`. The development worktree is preserved for review.

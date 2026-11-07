@@ -40,5 +40,15 @@
     ],
     "default_configuration": "combined",
     "verification": "Complete ordered row equality against verified local Parquet for all configurations and default; source-to-Parquet equality checked independently."
+  },
+  "validation": {
+    "dataset_tests_passed": 16,
+    "video_suite_tests_passed": 242,
+    "video_suite_dependency_warnings": 2,
+    "independent_source_to_parquet_equality": true,
+    "offline_rebuild_file_hash_equality": true,
+    "public_anonymous_access": true,
+    "focused_ruff": "passed",
+    "draft_pr": "https://github.com/leihanchen/DiffusionOPSD/pull/5"
   }
 }
