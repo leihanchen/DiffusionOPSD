@@ -71,6 +71,10 @@
     "original_caption_path_equality": true,
     "offline_rebuild_file_hash_equality": true,
     "focused_ruff": "passed",
-    "draft_pr": "https://github.com/leihanchen/DiffusionOPSD/pull/5"
+    "draft_pr": "https://github.com/leihanchen/DiffusionOPSD/pull/5",
+    "video_suite_tests_passed": 250,
+    "video_suite_dependency_warnings": 2,
+    "video_suite_environment": "Apptainer Cosmos runtime, four-CPU affinity, BLAS/OpenMP threads=1",
+    "initial_video_suite_failure": "FFmpeg thread creation resource exhaustion in test_native_three_model_tables_and_video_verification; isolated full-suite retry passed"
   }
 }
