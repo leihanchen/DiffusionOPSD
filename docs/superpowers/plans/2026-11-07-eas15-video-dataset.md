@@ -64,3 +64,9 @@ The published dataset reloads at a pinned HF revision with exactly two string co
 Published [cvis-tmu/VideoGPA-VideoREPA](https://huggingface.co/datasets/cvis-tmu/VideoGPA-VideoREPA) at `95f93059b25b2fbe4759d8e6be3aa36b30e85b62`. All configuration and default-view row comparisons passed. Public anonymous access was verified. Full video suite passed 242 tests with two dependency warnings, and focused Ruff passed.
 
 Draft [PR 5](https://github.com/leihanchen/DiffusionOPSD/pull/5) targets `main`. The development worktree is preserved for review.
+
+## VideoGPA original test subset update
+
+The user requested publishing the original 1K evaluation subset as test. The pinned `captions_1K.json` source supplies exactly 1,000 rows in both `combined/test` and `videogpa/test`. The columns remain `text` and `video_source`. Training Parquet byte hashes match the initial release. Normalized training/test captions and DL3DV scene IDs are checked for overlap. Publication requires an explicit current parent revision, preserving training content and rejecting concurrent updates.
+
+Published HF revision `a6909e889f5bb134778aaf6910f44cf18c7b8457` was reloaded, with independent anonymous source-to-HF equality for every test record. The dataset card and preparation script reproduce both splits.

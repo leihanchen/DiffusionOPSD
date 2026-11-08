@@ -10,10 +10,14 @@ configs:
   data_files:
   - split: train
     path: data/combined.parquet
+  - split: test
+    path: data/videogpa_test.parquet
 - config_name: videogpa
   data_files:
   - split: train
     path: data/videogpa.parquet
+  - split: test
+    path: data/videogpa_test.parquet
 - config_name: videorepa_32k
   data_files:
   - split: train
@@ -27,20 +31,21 @@ configs:
 # VideoGPA and VideoREPA training captions
 
 This dataset combines the released VideoGPA training captions with the exact
-32K and 64K OpenVid selections released by VideoREPA. Each configuration has
-one `train` split with two string columns.
+32K and 64K OpenVid selections released by VideoREPA. Every configuration has a `train` split. The `combined` and `videogpa`
+configurations also expose the original 1,000-caption VideoGPA evaluation subset
+as `test`. Both splits have two string columns.
 
 | Column | Meaning |
 | --- | --- |
 | `text` | Original caption, preserving its whitespace and wording |
 | `video_source` | Relative source path, prefixed with `DL3DV/` or `OpenVid/` |
 
-| Configuration | Rows |
-| --- | ---: |
-| `combined` (default) | 67,801 |
-| `videogpa` | 3,147 |
-| `videorepa_32k` | 32,000 |
-| `videorepa_64k` | 64,000 |
+| Configuration | Train | Test |
+| --- | ---: | ---: |
+| `combined` (default) | 67,801 | 1,000 |
+| `videogpa` | 3,147 | 1,000 |
+| `videorepa_32k` | 32,000 | — |
+| `videorepa_64k` | 64,000 | — |
 
 The VideoREPA selections share 31,346 identical caption/path pairs. The smaller
 selection includes 654 clips absent from the larger selection. `combined`
@@ -55,6 +60,7 @@ follow VideoGPA, then the 32K selection, then previously unseen 64K rows.
 from datasets import load_dataset
 
 dataset = load_dataset("cvis-tmu/VideoGPA-VideoREPA", split="train")
+test = load_dataset("cvis-tmu/VideoGPA-VideoREPA", split="test")
 # Access either exact VideoREPA selection or the VideoGPA captions.
 small = load_dataset("cvis-tmu/VideoGPA-VideoREPA", "videorepa_32k", split="train")
 large = load_dataset("cvis-tmu/VideoGPA-VideoREPA", "videorepa_64k", split="train")
@@ -84,8 +90,10 @@ source_path = Path("/path/to/source-data") / dataset[0]["video_source"]
 ## Provenance
 
 VideoGPA sources are `dl3dv_video_captions/captions_{8K,9K,10K,11K}.json` at
-commit `91356baa923e2f6f6991e3f3377fa1b60cc441da`. Its 1K evaluation captions are
-reserved upstream and are excluded from this training collection.
+commit `91356baa923e2f6f6991e3f3377fa1b60cc441da`. Its `captions_1K.json` evaluation captions supply the `test` split. All
+1,000 records preserve their source order, caption text and frame-directory keys.
+The release checks DL3DV scene IDs and normalized caption text for training/test
+overlap, including caption comparisons against the combined training collection.
 [VideoGPA repository](https://github.com/Hongyang-Du/VideoGPA),
 [VideoGPA paper](https://arxiv.org/abs/2601.23286).
 
@@ -130,10 +138,13 @@ python scripts/prepare_video_posttrain_dataset.py --offline --output outputs/vid
 # Publish with a Hugging Face account permitted to write under cvis-tmu.
 python scripts/prepare_video_posttrain_dataset.py --offline \
   --repo-id cvis-tmu/VideoGPA-VideoREPA --push-to-hub
+# To add the test split to a previous release, also supply its exact HF commit.
+# --expected-hub-revision <previous SHA>
 ```
 
 Publication uploads all configurations and metadata together and verifies complete
 row content after reloading every configuration from the returned commit. An
-existing matching release is verified again. A target with different contents is
-rejected to protect existing data. For an independent remote verification, pass
+existing matching release is verified again. Updating an existing release requires
+`--expected-hub-revision <current SHA>` and identical training content hashes.
+The Hub parent-commit guard rejects concurrent updates. For an independent remote verification, pass
 `--verify-hub-revision <SHA>`.

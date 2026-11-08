@@ -38,6 +38,12 @@ def sources(tmp_path):
             "config": config, "path": name, "url": "https://example.invalid/" + name,
             "sha256": hashlib.sha256(data).hexdigest(), "rows": count,
         })
+    test_bytes = b'{"1K/test_scene/images_8": "  A held-out scene.\\n"}'
+    (tmp_path / "test.json").write_bytes(test_bytes)
+    recipe["test_source"] = {
+        "config": "videogpa", "path": "test.json", "url": "https://example.invalid/test.json",
+        "sha256": hashlib.sha256(test_bytes).hexdigest(), "rows": 1,
+    }
     path = tmp_path / "recipe.json"
     path.write_text(json.dumps(recipe))
     return path, tmp_path
@@ -157,3 +163,75 @@ def test_preserves_valid_release_when_new_source_validation_fails(dataset_script
     with pytest.raises(ValueError, match="SHA-256"):
         dataset_script.materialize(recipe, output, cache, offline=True)
     assert dataset_script.verify_release(output) == before
+
+
+def test_original_videogpa_evaluation_is_test_in_combined_and_gpa(dataset_script, sources, tmp_path):
+    from datasets import load_dataset
+
+    recipe, cache = sources
+    output = tmp_path / "release"
+    report = dataset_script.materialize(recipe, output, cache, offline=True)
+    expected = [{"text": "  A held-out scene.\n", "video_source": "DL3DV/1K/test_scene/images_8"}]
+    assert report["test"]["rows"] == 1
+    for config in ["combined", "videogpa"]:
+        assert load_dataset(str(output), config, split="test").to_list() == expected
+    assert load_dataset(str(output), split="test").to_list() == expected
+    assert set(load_dataset(str(output), "videorepa_32k")) == {"train"}
+
+
+@pytest.mark.parametrize("key,text", [
+    ("1K/scene/images_8", "Different description"),
+    ("1K/test_scene/images_8", " a SCENE. "),
+])
+def test_rejects_train_test_scene_or_caption_leakage(dataset_script, sources, tmp_path, key, text):
+    recipe_path, cache = sources
+    recipe = json.loads(recipe_path.read_text())
+    data = json.dumps({key: text}).encode()
+    (cache / "test.json").write_bytes(data)
+    recipe["test_source"]["sha256"] = hashlib.sha256(data).hexdigest()
+    recipe_path.write_text(json.dumps(recipe))
+    with pytest.raises(ValueError, match="overlap"):
+        dataset_script.materialize(recipe_path, tmp_path / "release", cache, offline=True)
+
+
+@pytest.mark.parametrize("expected_revision,altered_training,match", [
+    (None, False, "expected-hub-revision"),
+    ("stale", False, "expected-hub-revision"),
+    ("current", True, "alter training data"),
+])
+def test_hub_update_requires_current_parent_and_matching_training(
+    dataset_script, sources, tmp_path, monkeypatch, expected_revision, altered_training, match
+):
+    from types import SimpleNamespace
+
+    import huggingface_hub
+
+    recipe, cache = sources
+    output = tmp_path / "release"
+    previous = dataset_script.materialize(recipe, output, cache, offline=True)
+    del previous["test"]
+    del previous["files"]["data/videogpa_test.parquet"]
+    if altered_training:
+        previous["configurations"]["combined"]["rows"] = 99
+    remote = tmp_path / "remote-audit.json"
+    remote.write_text(json.dumps(previous))
+
+    class PreviousReleaseApi:
+        def whoami(self):
+            return {"name": "tester", "orgs": [{"name": "cvis-tmu"}]}
+
+        def create_repo(self, *args, **kwargs):
+            pass
+
+        def repo_info(self, *args, **kwargs):
+            return SimpleNamespace(sha="current", siblings=[
+                SimpleNamespace(rfilename=name) for name in [*previous["files"], "audit.json"]
+            ])
+
+        def create_commit(self, *args, **kwargs):
+            pytest.fail("Unapproved/stale/destructive update must not reach commit")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", PreviousReleaseApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *args, **kwargs: str(remote))
+    with pytest.raises(ValueError, match=match):
+        dataset_script.publish(output, "cvis-tmu/VideoGPA-VideoREPA", expected_revision=expected_revision)

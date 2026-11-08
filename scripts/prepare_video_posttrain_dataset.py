@@ -111,12 +111,29 @@ def collect(recipe: dict, cache_dir: Path, *, offline: bool = False) -> dict[str
     return configs
 
 
+def collect_test(recipe: dict, configs: dict, cache_dir: Path, *, offline: bool) -> list[dict]:
+    source = recipe.get("test_source")
+    if source is None:
+        return []
+    rows = parse_source("videogpa", source_bytes(source, cache_dir, offline=offline))
+    if len(rows) != source["rows"]:
+        raise ValueError(f"Test source row count mismatch: {len(rows)}")
+    train_text = {" ".join(row["text"].split()).casefold() for row in configs["combined"]}
+    test_text = {" ".join(row["text"].split()).casefold() for row in rows}
+    train_scenes = {row["video_source"].split("/")[2] for row in configs["videogpa"]}
+    test_scenes = {row["video_source"].split("/")[2] for row in rows}
+    if train_text & test_text or train_scenes & test_scenes:
+        raise ValueError("Training/test caption or DL3DV scene overlap")
+    return rows
+
+
 def materialize(recipe_path: Path, output: Path, cache_dir: Path, *, offline: bool = False) -> dict:
     from datasets import Dataset, Features, Value
 
     recipe_bytes = recipe_path.read_bytes()
     recipe = json.loads(recipe_bytes)
     configs = collect(recipe, cache_dir, offline=offline)
+    test_rows = collect_test(recipe, configs, cache_dir, offline=offline)
     features = Features({"text": Value("string"), "video_source": Value("string")})
     output = output.resolve()
     # An existing release is immutable. A caller can choose a new output directory to rebuild.
@@ -140,6 +157,9 @@ def materialize(recipe_path: Path, output: Path, cache_dir: Path, *, offline: bo
             dataset = Dataset.from_list(rows, features=features)
             dataset.to_parquet(str(stage / "data" / f"{name}.parquet"))
             report["configurations"][name] = {"rows": len(rows), "content_sha256": row_hash(rows)}
+        if test_rows:
+            Dataset.from_list(test_rows, features=features).to_parquet(str(stage / "data/videogpa_test.parquet"))
+            report["test"] = {"rows": len(test_rows), "content_sha256": row_hash(test_rows)}
         shutil.copyfile(CARD_PATH, stage / "README.md")
         (stage / "sources.json").write_bytes(recipe_bytes)
         for path in sorted(stage.rglob("*")):
@@ -156,6 +176,8 @@ def verify_release(output: Path) -> dict:
 
     report = json.loads((output / "audit.json").read_text(encoding="utf-8"))
     expected_files = {"README.md", "sources.json", *(f"data/{name}.parquet" for name in CONFIGS)}
+    if "test" in report:
+        expected_files.add("data/videogpa_test.parquet")
     if set(report["files"]) != expected_files:
         raise ValueError("Unexpected release file inventory")
     for name, expected_hash in report["files"].items():
@@ -167,6 +189,11 @@ def verify_release(output: Path) -> dict:
         expected = report["configurations"][name]
         if data.features != features or len(data) != expected["rows"] or row_hash(data.to_list()) != expected["content_sha256"]:
             raise ValueError(f"Schema, row count or content mismatch for {name}")
+    if "test" in report:
+        data = Dataset.from_parquet(str(output / "data/videogpa_test.parquet"))
+        expected = report["test"]
+        if data.features != features or len(data) != expected["rows"] or row_hash(data.to_list()) != expected["content_sha256"]:
+            raise ValueError("Schema, row count or content mismatch for test")
     return report
 
 
@@ -184,10 +211,18 @@ def verify_hub(output: Path, repo_id: str, revision: str) -> dict:
     default = load_dataset(repo_id, split="train", revision=revision)
     if row_hash(default.to_list()) != report["configurations"]["combined"]["content_sha256"]:
         raise ValueError("Hub default configuration differs from combined")
-    return {"repo_id": repo_id, "revision": revision, "verified_configurations": list(CONFIGS)}
+    if "test" in report:
+        for config in ["combined", "videogpa", None]:
+            data = load_dataset(repo_id, config, split="test", revision=revision)
+            if data.features != default.features or len(data) != report["test"]["rows"]:
+                raise ValueError(f"Hub test schema/count mismatch for {config}")
+            if row_hash(data.to_list()) != report["test"]["content_sha256"]:
+                raise ValueError(f"Hub test content mismatch for {config}")
+    return {"repo_id": repo_id, "revision": revision, "verified_configurations": list(CONFIGS),
+            "verified_test_configurations": ["combined", "videogpa"] if "test" in report else []}
 
 
-def publish(output: Path, repo_id: str) -> dict:
+def publish(output: Path, repo_id: str, *, expected_revision: str | None = None) -> dict:
     from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download
 
     report = verify_release(output)
@@ -200,12 +235,16 @@ def publish(output: Path, repo_id: str) -> dict:
     info = api.repo_info(repo_id, repo_type="dataset")
     existing = {file.rfilename for file in info.siblings} - {".gitattributes"}
     if existing:
-        if existing != {*report["files"], "audit.json"}:
+        if not existing.issubset({*report["files"], "audit.json"}) or "audit.json" not in existing:
             raise ValueError("Target HF repository has other content; refusing to overwrite it")
         remote = Path(hf_hub_download(repo_id, "audit.json", repo_type="dataset", revision=info.sha))
-        if remote.read_bytes() != (output / "audit.json").read_bytes():
-            raise ValueError("Target HF repository contains a different release; refusing to overwrite it")
-        return verify_hub(output, repo_id, info.sha)
+        if remote.read_bytes() == (output / "audit.json").read_bytes():
+            return verify_hub(output, repo_id, info.sha)
+        if expected_revision is None or info.sha != expected_revision:
+            raise ValueError("Different Hub release; pass --expected-hub-revision with the current SHA to update")
+        previous = json.loads(remote.read_bytes())
+        if previous["configurations"] != report["configurations"]:
+            raise ValueError("Test-split update would alter training data; refusing to overwrite it")
     operations = [
         CommitOperationAdd(path_in_repo=name, path_or_fileobj=str(output / name))
         for name in sorted({*report["files"], "audit.json"})
@@ -225,12 +264,13 @@ def main() -> None:
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--repo-id", default="cvis-tmu/VideoGPA-VideoREPA")
     parser.add_argument("--push-to-hub", action="store_true")
+    parser.add_argument("--expected-hub-revision", help="Explicit parent SHA when updating an existing release")
     parser.add_argument("--verify-hub-revision", help="Reload an already published commit without uploading")
     args = parser.parse_args()
     report = materialize(args.recipe, args.output, args.cache_dir, offline=args.offline)
     print(json.dumps(report, indent=2))
     if args.push_to_hub:
-        print(json.dumps(publish(args.output, args.repo_id), indent=2))
+        print(json.dumps(publish(args.output, args.repo_id, expected_revision=args.expected_hub_revision), indent=2))
     elif args.verify_hub_revision:
         print(json.dumps(verify_hub(args.output, args.repo_id, args.verify_hub_revision), indent=2))
 
