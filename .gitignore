@@ -15,6 +15,7 @@ logs/
 outputs/
 data/pickapic/train.txt
 data/pickapic/test.txt
+data/video_posttrain/generated/
 checkpoints/
 reward_ckpts/
 video_reward_ckpts/

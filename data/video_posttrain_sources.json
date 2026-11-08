@@ -1,0 +1,77 @@
+{
+  "format_version": 1,
+  "dataset_id": "cvis-tmu/VideoGPA-VideoREPA",
+  "sources": [
+    {
+      "config": "videogpa",
+      "repository": "Hongyang-Du/VideoGPA",
+      "revision": "91356baa923e2f6f6991e3f3377fa1b60cc441da",
+      "path": "dl3dv_video_captions/captions_8K.json",
+      "rows": 840,
+      "url": "https://raw.githubusercontent.com/Hongyang-Du/VideoGPA/91356baa923e2f6f6991e3f3377fa1b60cc441da/dl3dv_video_captions/captions_8K.json",
+      "sha256": "e24750d337d5f04a3f5d74926ff95ffb576f2bcf503281d2997a415a6ee47bd8"
+    },
+    {
+      "config": "videogpa",
+      "repository": "Hongyang-Du/VideoGPA",
+      "revision": "91356baa923e2f6f6991e3f3377fa1b60cc441da",
+      "path": "dl3dv_video_captions/captions_9K.json",
+      "rows": 900,
+      "url": "https://raw.githubusercontent.com/Hongyang-Du/VideoGPA/91356baa923e2f6f6991e3f3377fa1b60cc441da/dl3dv_video_captions/captions_9K.json",
+      "sha256": "9fe07d253dd0f57890730a7b45c9fe96e1154fbabec8a5d633eb99db7bdde720"
+    },
+    {
+      "config": "videogpa",
+      "repository": "Hongyang-Du/VideoGPA",
+      "revision": "91356baa923e2f6f6991e3f3377fa1b60cc441da",
+      "path": "dl3dv_video_captions/captions_10K.json",
+      "rows": 909,
+      "url": "https://raw.githubusercontent.com/Hongyang-Du/VideoGPA/91356baa923e2f6f6991e3f3377fa1b60cc441da/dl3dv_video_captions/captions_10K.json",
+      "sha256": "7c14c085ad0a986edaf8a88dbe859fe4920f09585f785d9a199d2593098a76b1"
+    },
+    {
+      "config": "videogpa",
+      "repository": "Hongyang-Du/VideoGPA",
+      "revision": "91356baa923e2f6f6991e3f3377fa1b60cc441da",
+      "path": "dl3dv_video_captions/captions_11K.json",
+      "rows": 498,
+      "url": "https://raw.githubusercontent.com/Hongyang-Du/VideoGPA/91356baa923e2f6f6991e3f3377fa1b60cc441da/dl3dv_video_captions/captions_11K.json",
+      "sha256": "b7e29128eb65e1ce81a4b007eca42f745204bb4f79d8ca79e7787c7b894eb7af"
+    },
+    {
+      "config": "videorepa_32k",
+      "repository": "aHapBean/VideoREPA",
+      "revision": "8d581dc301e18546a1808436c724f59d259d09f9",
+      "path": "finetune/openvid/openvid_3w2.csv",
+      "rows": 32000,
+      "url": "https://raw.githubusercontent.com/aHapBean/VideoREPA/8d581dc301e18546a1808436c724f59d259d09f9/finetune/openvid/openvid_3w2.csv",
+      "sha256": "7c116ee8363cb3506896be698b839b280bcdd4386c2ab1c3f73a9a3478231eb8"
+    },
+    {
+      "config": "videorepa_64k",
+      "repository": "aHapBean/VideoREPA",
+      "revision": "8d581dc301e18546a1808436c724f59d259d09f9",
+      "path": "finetune/openvid/openvid_6w4.csv",
+      "rows": 64000,
+      "url": "https://raw.githubusercontent.com/aHapBean/VideoREPA/8d581dc301e18546a1808436c724f59d259d09f9/finetune/openvid/openvid_6w4.csv",
+      "sha256": "7b088e3b5a76c0156967926492cc53d107f579f6fe01e2a6180337239c974956"
+    }
+  ],
+  "expected_rows": {
+    "videogpa": 3147,
+    "videorepa_32k": 32000,
+    "videorepa_64k": 64000,
+    "combined": 67801
+  },
+  "expected_shared_videorepa_rows": 31346,
+  "test_source": {
+    "config": "videogpa",
+    "repository": "Hongyang-Du/VideoGPA",
+    "revision": "91356baa923e2f6f6991e3f3377fa1b60cc441da",
+    "path": "dl3dv_video_captions/captions_1K.json",
+    "rows": 1000,
+    "url": "https://raw.githubusercontent.com/Hongyang-Du/VideoGPA/91356baa923e2f6f6991e3f3377fa1b60cc441da/dl3dv_video_captions/captions_1K.json",
+    "sha256": "e965cc30e05c89cfa6bc6a591c0547073b68ee3c62b3138519538f76a51c2d4e"
+  },
+  "combined_metadata_version": 1
+}
