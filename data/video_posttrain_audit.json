@@ -60,6 +60,9 @@
     "videogpa_train_test_scene_overlap": 0,
     "public_anonymous_test_access": true,
     "focused_ruff": "passed",
-    "draft_pr": "https://github.com/leihanchen/DiffusionOPSD/pull/5"
+    "draft_pr": "https://github.com/leihanchen/DiffusionOPSD/pull/5",
+    "video_suite_tests_passed": 248,
+    "video_suite_dependency_warnings": 2,
+    "offline_rebuild_file_hash_equality": true
   }
 }
