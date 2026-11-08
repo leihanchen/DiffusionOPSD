@@ -72,5 +72,6 @@
     "rows": 1000,
     "url": "https://raw.githubusercontent.com/Hongyang-Du/VideoGPA/91356baa923e2f6f6991e3f3377fa1b60cc441da/dl3dv_video_captions/captions_1K.json",
     "sha256": "e965cc30e05c89cfa6bc6a591c0547073b68ee3c62b3138519538f76a51c2d4e"
-  }
+  },
+  "combined_metadata_version": 1
 }

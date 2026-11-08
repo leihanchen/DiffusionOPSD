@@ -235,3 +235,52 @@ def test_hub_update_requires_current_parent_and_matching_training(
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *args, **kwargs: str(remote))
     with pytest.raises(ValueError, match=match):
         dataset_script.publish(output, "cvis-tmu/VideoGPA-VideoREPA", expected_revision=expected_revision)
+
+
+def test_combined_metadata_preserves_all_source_memberships_and_identity(dataset_script):
+    gpa = {"text": "  scene\n", "video_source": "DL3DV/8K/hash/images_8"}
+    video = {"text": "Action", "video_source": "OpenVid/original_id_2_10to50.mp4"}
+    configs = {"videogpa": [gpa], "videorepa_32k": [video], "videorepa_64k": [video]}
+    rows = dataset_script.enrich_combined([gpa, video], configs)
+    assert rows[0] == {**gpa, "sample_id": hashlib.sha256(
+        b'["  scene\\n","DL3DV/8K/hash/images_8"]'
+    ).hexdigest(), "source_dataset": "videogpa", "source_subsets": ["videogpa_8k"],
+        "source_group_id": "DL3DV/hash", "media_type": "frame_directory"}
+    assert rows[1]["source_subsets"] == ["videorepa_32k", "videorepa_64k"]
+    assert rows[1]["source_group_id"] == "OpenVid/original_id"
+    assert rows[1]["media_type"] == "video"
+    assert rows[1]["source_dataset"] == "videorepa"
+    assert rows[0]["sample_id"] != rows[1]["sample_id"]
+    assert dataset_script.enrich_combined([video], configs)[0] == rows[1]
+    assert configs["videogpa"][0] == gpa
+
+
+def test_combined_test_metadata_and_source_views_have_correct_schemas(dataset_script, sources, tmp_path):
+    from datasets import load_dataset
+
+    recipe, cache = sources
+    data = json.loads(recipe.read_text())
+    data["combined_metadata_version"] = 1
+    recipe.write_text(json.dumps(data))
+    # Replace the abbreviated fixture filenames with real OpenVid suffix conventions.
+    for name in ["small.csv", "large.csv"]:
+        raw = (cache / name).read_bytes()
+        for char in [b"a", b"b", b"c"]:
+            raw = raw.replace(char + b".mp4", char + b"_0_0to10.mp4")
+        (cache / name).write_bytes(raw)
+        for source in data["sources"]:
+            if source["path"] == name:
+                source["sha256"] = hashlib.sha256(raw).hexdigest()
+    recipe.write_text(json.dumps(data))
+    output = tmp_path / "release"
+    report = dataset_script.materialize(recipe, output, cache, offline=True)
+    combined = load_dataset(str(output), "combined")
+    columns = ["text", "video_source", "sample_id", "source_dataset", "source_subsets", "source_group_id", "media_type"]
+    assert combined["train"].column_names == columns
+    assert combined["test"].column_names == columns
+    assert combined["test"][0]["source_subsets"] == ["videogpa_1k"]
+    assert len(set(combined["train"]["sample_id"])) == 4
+    assert set(combined["train"]["sample_id"]).isdisjoint(combined["test"]["sample_id"])
+    assert load_dataset(str(output), "videogpa", split="test").column_names == ["text", "video_source"]
+    assert report["configurations"]["combined"]["base_content_sha256"]
+    assert dataset_script.verify_release(output) == report

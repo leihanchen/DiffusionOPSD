@@ -9,8 +9,8 @@ import hashlib
 import io
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
-import shutil
 import tempfile
 import urllib.request
 
@@ -20,6 +20,44 @@ DEFAULT_RECIPE = ROOT / "data/video_posttrain_sources.json"
 CARD_PATH = ROOT / "data/video_posttrain/README.md"
 SOURCE_CONFIGS = ("videogpa", "videorepa_32k", "videorepa_64k")
 CONFIGS = (*SOURCE_CONFIGS, "combined")
+
+
+def dataset_features(enriched: bool = False):
+    from datasets import Features, Sequence, Value
+
+    fields = {"text": Value("string"), "video_source": Value("string")}
+    if enriched:
+        fields.update(sample_id=Value("string"), source_dataset=Value("string"),
+                      source_subsets=Sequence(Value("string")), source_group_id=Value("string"),
+                      media_type=Value("string"))
+    return Features(fields)
+
+
+def enrich_combined(rows: list[dict], configs: dict) -> list[dict]:
+    memberships = {}
+    for name in ("videorepa_32k", "videorepa_64k"):
+        for row in configs[name]:
+            memberships.setdefault((row["text"], row["video_source"]), []).append(name)
+    enriched = []
+    for row in rows:
+        text, path = row["text"], row["video_source"]
+        if path.startswith("DL3DV/"):
+            _, subset, scene, *_ = path.split("/")
+            dataset, subsets, group, media = "videogpa", [f"videogpa_{subset.lower()}"], f"DL3DV/{scene}", "frame_directory"
+        else:
+            match = re.fullmatch(r"OpenVid/(.+)_\d+_\d+to\d+\.mp4", path)
+            if match is None:
+                raise ValueError(f"Cannot derive original OpenVid source group from {path!r}")
+            dataset, subsets = "videorepa", memberships[(text, path)]
+            group, media = f"OpenVid/{match[1]}", "video"
+        identity = json.dumps([text, path], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        enriched.append({**row, "sample_id": sha256(identity), "source_dataset": dataset,
+                         "source_subsets": list(subsets), "source_group_id": group, "media_type": media})
+    return enriched
+
+
+def base_rows(rows: list[dict]) -> list[dict]:
+    return [{"text": row["text"], "video_source": row["video_source"]} for row in rows]
 
 
 def sha256(data: bytes) -> str:
@@ -108,6 +146,8 @@ def collect(recipe: dict, cache_dir: Path, *, offline: bool = False) -> dict[str
     )
     if shared != recipe["expected_shared_videorepa_rows"]:
         raise ValueError(f"VideoREPA overlap mismatch: {shared}")
+    if recipe.get("combined_metadata_version") == 1:
+        configs["combined"] = enrich_combined(configs["combined"], configs)
     return configs
 
 
@@ -128,13 +168,14 @@ def collect_test(recipe: dict, configs: dict, cache_dir: Path, *, offline: bool)
 
 
 def materialize(recipe_path: Path, output: Path, cache_dir: Path, *, offline: bool = False) -> dict:
-    from datasets import Dataset, Features, Value
+    from datasets import Dataset
 
     recipe_bytes = recipe_path.read_bytes()
     recipe = json.loads(recipe_bytes)
     configs = collect(recipe, cache_dir, offline=offline)
     test_rows = collect_test(recipe, configs, cache_dir, offline=offline)
-    features = Features({"text": Value("string"), "video_source": Value("string")})
+    enriched = recipe.get("combined_metadata_version") == 1
+    features = dataset_features()
     output = output.resolve()
     # An existing release is immutable. A caller can choose a new output directory to rebuild.
     if output.exists():
@@ -148,19 +189,32 @@ def materialize(recipe_path: Path, output: Path, cache_dir: Path, *, offline: bo
         (stage / "data").mkdir(parents=True)
         report = {
             "format_version": 1,
+            "combined_metadata_version": int(enriched),
             "recipe_sha256": sha256(recipe_bytes),
             "shared_videorepa_rows": recipe["expected_shared_videorepa_rows"],
             "configurations": {},
             "files": {},
         }
         for name, rows in configs.items():
-            dataset = Dataset.from_list(rows, features=features)
+            dataset = Dataset.from_list(rows, features=dataset_features(enriched and name == "combined"))
             dataset.to_parquet(str(stage / "data" / f"{name}.parquet"))
             report["configurations"][name] = {"rows": len(rows), "content_sha256": row_hash(rows)}
+            if enriched and name == "combined":
+                report["configurations"][name]["base_content_sha256"] = row_hash(base_rows(rows))
         if test_rows:
             Dataset.from_list(test_rows, features=features).to_parquet(str(stage / "data/videogpa_test.parquet"))
             report["test"] = {"rows": len(test_rows), "content_sha256": row_hash(test_rows)}
-        shutil.copyfile(CARD_PATH, stage / "README.md")
+            if enriched:
+                combined_test = enrich_combined(test_rows, configs)
+                Dataset.from_list(combined_test, features=dataset_features(True)).to_parquet(
+                    str(stage / "data/combined_test.parquet")
+                )
+                report["combined_test"] = {"rows": len(combined_test), "content_sha256": row_hash(combined_test),
+                                           "base_content_sha256": row_hash(test_rows)}
+        card = CARD_PATH.read_text(encoding="utf-8")
+        if not enriched:
+            card = card.replace("data/combined_test.parquet", "data/videogpa_test.parquet")
+        (stage / "README.md").write_text(card, encoding="utf-8")
         (stage / "sources.json").write_bytes(recipe_bytes)
         for path in sorted(stage.rglob("*")):
             if path.is_file():
@@ -172,26 +226,31 @@ def materialize(recipe_path: Path, output: Path, cache_dir: Path, *, offline: bo
 
 
 def verify_release(output: Path) -> dict:
-    from datasets import Dataset, Features, Value
+    from datasets import Dataset
 
     report = json.loads((output / "audit.json").read_text(encoding="utf-8"))
     expected_files = {"README.md", "sources.json", *(f"data/{name}.parquet" for name in CONFIGS)}
     if "test" in report:
         expected_files.add("data/videogpa_test.parquet")
+    if "combined_test" in report:
+        expected_files.add("data/combined_test.parquet")
     if set(report["files"]) != expected_files:
         raise ValueError("Unexpected release file inventory")
     for name, expected_hash in report["files"].items():
         if sha256((output / name).read_bytes()) != expected_hash:
             raise ValueError(f"SHA-256 mismatch for output {name}")
-    features = Features({"text": Value("string"), "video_source": Value("string")})
     for name in CONFIGS:
         data = Dataset.from_parquet(str(output / "data" / f"{name}.parquet"))
         expected = report["configurations"][name]
+        features = dataset_features(bool(report.get("combined_metadata_version")) and name == "combined")
         if data.features != features or len(data) != expected["rows"] or row_hash(data.to_list()) != expected["content_sha256"]:
             raise ValueError(f"Schema, row count or content mismatch for {name}")
-    if "test" in report:
-        data = Dataset.from_parquet(str(output / "data/videogpa_test.parquet"))
-        expected = report["test"]
+    for key, filename in [("test", "videogpa_test"), ("combined_test", "combined_test")]:
+        if key not in report:
+            continue
+        data = Dataset.from_parquet(str(output / "data" / f"{filename}.parquet"))
+        expected = report[key]
+        features = dataset_features(key == "combined_test")
         if data.features != features or len(data) != expected["rows"] or row_hash(data.to_list()) != expected["content_sha256"]:
             raise ValueError("Schema, row count or content mismatch for test")
     return report
@@ -204,7 +263,7 @@ def verify_hub(output: Path, repo_id: str, revision: str) -> dict:
     for name in CONFIGS:
         data = load_dataset(repo_id, name, split="train", revision=revision)
         expected = report["configurations"][name]
-        if list(data.features) != ["text", "video_source"] or any(f.dtype != "string" for f in data.features.values()):
+        if data.features != dataset_features(bool(report.get("combined_metadata_version")) and name == "combined"):
             raise ValueError(f"Hub schema mismatch for {name}")
         if len(data) != expected["rows"] or row_hash(data.to_list()) != expected["content_sha256"]:
             raise ValueError(f"Hub content mismatch for {name}")
@@ -214,9 +273,11 @@ def verify_hub(output: Path, repo_id: str, revision: str) -> dict:
     if "test" in report:
         for config in ["combined", "videogpa", None]:
             data = load_dataset(repo_id, config, split="test", revision=revision)
-            if data.features != default.features or len(data) != report["test"]["rows"]:
+            enriched = bool(report.get("combined_metadata_version")) and config != "videogpa"
+            expected = report["combined_test"] if enriched else report["test"]
+            if data.features != dataset_features(enriched) or len(data) != expected["rows"]:
                 raise ValueError(f"Hub test schema/count mismatch for {config}")
-            if row_hash(data.to_list()) != report["test"]["content_sha256"]:
+            if row_hash(data.to_list()) != expected["content_sha256"]:
                 raise ValueError(f"Hub test content mismatch for {config}")
     return {"repo_id": repo_id, "revision": revision, "verified_configurations": list(CONFIGS),
             "verified_test_configurations": ["combined", "videogpa"] if "test" in report else []}
@@ -243,8 +304,14 @@ def publish(output: Path, repo_id: str, *, expected_revision: str | None = None)
         if expected_revision is None or info.sha != expected_revision:
             raise ValueError("Different Hub release; pass --expected-hub-revision with the current SHA to update")
         previous = json.loads(remote.read_bytes())
-        if previous["configurations"] != report["configurations"]:
-            raise ValueError("Test-split update would alter training data; refusing to overwrite it")
+        previous_base = {name: (entry["rows"], entry.get("base_content_sha256", entry["content_sha256"]))
+                         for name, entry in previous["configurations"].items()}
+        current_base = {name: (entry["rows"], entry.get("base_content_sha256", entry["content_sha256"]))
+                        for name, entry in report["configurations"].items()}
+        if previous_base != current_base:
+            raise ValueError("Update would alter training data; refusing to overwrite it")
+        if "test" in previous and previous["test"] != report.get("test"):
+            raise ValueError("Update would alter original test data; refusing to overwrite it")
     operations = [
         CommitOperationAdd(path_in_repo=name, path_or_fileobj=str(output / name))
         for name in sorted({*report["files"], "audit.json"})

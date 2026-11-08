@@ -11,7 +11,7 @@ configs:
   - split: train
     path: data/combined.parquet
   - split: test
-    path: data/videogpa_test.parquet
+    path: data/combined_test.parquet
 - config_name: videogpa
   data_files:
   - split: train
@@ -33,12 +33,18 @@ configs:
 This dataset combines the released VideoGPA training captions with the exact
 32K and 64K OpenVid selections released by VideoREPA. Every configuration has a `train` split. The `combined` and `videogpa`
 configurations also expose the original 1,000-caption VideoGPA evaluation subset
-as `test`. Both splits have two string columns.
+as `test`. The source configurations have two string columns. Both splits in the default
+`combined` configuration have seven columns, including provenance metadata.
 
 | Column | Meaning |
 | --- | --- |
 | `text` | Original caption, preserving its whitespace and wording |
 | `video_source` | Relative source path, prefixed with `DL3DV/` or `OpenVid/` |
+| `sample_id` | SHA-256 of the original caption and source path, stable across ordering and splits |
+| `source_dataset` | `videogpa` or `videorepa` |
+| `source_subsets` | List of exact source selections containing this record |
+| `source_group_id` | Original DL3DV scene or OpenVid source-video ID, with dataset prefix |
+| `media_type` | `frame_directory` for DL3DV, `video` for OpenVid |
 
 | Configuration | Train | Test |
 | --- | ---: | ---: |
@@ -46,6 +52,19 @@ as `test`. Both splits have two string columns.
 | `videogpa` | 3,147 | 1,000 |
 | `videorepa_32k` | 32,000 | — |
 | `videorepa_64k` | 64,000 | — |
+
+The five metadata fields are present in `combined/train` and `combined/test`.
+`source_subsets` uses `videogpa_8k`, `videogpa_9k`, `videogpa_10k`,
+`videogpa_11k`, or `videogpa_1k` for VideoGPA. For VideoREPA it contains
+`videorepa_32k`, `videorepa_64k`, or both in that order. It is a list of strings.
+All other fields are strings. The source configurations preserve their original
+two-column schema.
+
+`sample_id` hashes the UTF-8 JSON array `[text, video_source]`, with
+`ensure_ascii=False` and compact separators, without a trailing newline.
+`source_group_id` drops the DL3DV subset/frame-directory components, or the
+OpenVid `_segment_starttoend.mp4` suffix, preserving underscores in the original
+video ID. These groups support future leakage-aware splitting.
 
 The VideoREPA selections share 31,346 identical caption/path pairs. The smaller
 selection includes 654 clips absent from the larger selection. `combined`
@@ -145,6 +164,6 @@ python scripts/prepare_video_posttrain_dataset.py --offline \
 Publication uploads all configurations and metadata together and verifies complete
 row content after reloading every configuration from the returned commit. An
 existing matching release is verified again. Updating an existing release requires
-`--expected-hub-revision <current SHA>` and identical training content hashes.
+`--expected-hub-revision <current SHA>` and identical original training caption/path content hashes.
 The Hub parent-commit guard rejects concurrent updates. For an independent remote verification, pass
 `--verify-hub-revision <SHA>`.

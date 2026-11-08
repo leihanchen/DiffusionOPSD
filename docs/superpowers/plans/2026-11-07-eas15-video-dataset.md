@@ -70,3 +70,9 @@ Draft [PR 5](https://github.com/leihanchen/DiffusionOPSD/pull/5) targets `main`.
 The user requested publishing the original 1K evaluation subset as test. The pinned `captions_1K.json` source supplies exactly 1,000 rows in both `combined/test` and `videogpa/test`. The columns remain `text` and `video_source`. Training Parquet byte hashes match the initial release. Normalized training/test captions and DL3DV scene IDs are checked for overlap. Publication requires an explicit current parent revision, preserving training content and rejecting concurrent updates.
 
 Published HF revision `a6909e889f5bb134778aaf6910f44cf18c7b8457` was reloaded, with independent anonymous source-to-HF equality for every test record. The dataset card and preparation script reproduce both splits.
+
+## Combined metadata update
+
+The user requested `sample_id`, `source_dataset`, `source_subsets`, `source_group_id`, and `media_type` in the combined data. Both combined splits now have seven columns. Exact-source configurations retain their two-column schema, with a dedicated combined test Parquet for schema consistency. IDs hash the compact UTF-8 JSON array `[text, video_source]`. Membership lists retain both VideoREPA subsets where applicable. Group IDs identify original DL3DV scenes or OpenVid source videos. The dataset card specifies all conventions.
+
+Published revision `b5c9967cb7801ceec0b3581839d065131eefc5be` reloaded successfully. Independent checks cover all 67,801 training and 1,000 test rows, unique IDs, exact memberships and source groups. Offline rebuilding reproduces all output hashes. Original caption/path content is preserved.
