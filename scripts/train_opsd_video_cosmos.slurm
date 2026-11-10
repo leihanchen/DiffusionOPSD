@@ -24,4 +24,6 @@ mkdir -p "$RUN_DIR"
 ARGS=(--config "${COSMOS_CONFIG:-config/cosmos_nano.py}" --run-dir "$RUN_DIR"
       --max-updates-this-job "${COSMOS_MAX_UPDATES:-0}")
 [[ "${COSMOS_RESUME:-0}" == 1 ]] && ARGS+=(--resume)
+COSMOS_USE_GPU=0 bash scripts/run_cosmos_python.sh scripts/prefetch_video_dataset.py \
+  --config "${COSMOS_CONFIG:-config/cosmos_nano.py}" --check-only
 bash scripts/run_cosmos_python.sh scripts/train_opsd_video_cosmos.py "${ARGS[@]}"

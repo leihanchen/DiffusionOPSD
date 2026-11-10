@@ -21,6 +21,12 @@ for path in (ROOT / "src", ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
+if "--validate-dataset-only" in sys.argv:
+    from diffusionopsd.video.training_data import validate_dataset_cli
+
+    validate_dataset_cli("config/wan22_ti2v_epoch.py")
+    raise SystemExit(0)
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -30,6 +36,7 @@ from ml_collections import config_flags
 from peft import get_peft_model_state_dict, set_peft_model_state_dict
 
 from diffusionopsd.stat_tracking import PerPromptStatTracker
+from diffusionopsd.video.training_data import load_training_data
 from diffusionopsd.video.nccl_network import configure_socket_interface
 from diffusionopsd.video.branch_loss import branch_loss
 from diffusionopsd.video.distributed_epoch import (
@@ -288,6 +295,7 @@ def _targets_and_gradients(tuples, weights, roll, reward, policy, opt, cfg, tau_
 
 def main(_):
     cfg = FLAGS.config
+    data = load_training_data(cfg)
     configure_reward(cfg)
     if FLAGS.max_updates_this_job < 0 or FLAGS.distributed_timeout_minutes <= 0:
         raise ValueError("Update limit must be nonnegative and distributed timeout must be positive")
@@ -301,8 +309,8 @@ def main(_):
         raise ValueError("Require 4/8/16 workers and a fixed four-prompt, four-rollout-per-prompt batch")
     if not FLAGS.scalable_two_gpu and world != 4:
         raise ValueError("Additional workers require the scalable two-GPU launcher")
-    if cfg.num_epochs != 50 or cfg.save_freq != 50 or cfg.eval_freq != 25 or not cfg.use_lora:
-        raise ValueError("Expected 50-update Wan2.2 LoRA preset with evaluation every 25")
+    if cfg.num_epochs <= 0 or cfg.save_freq <= 0 or cfg.eval_freq < 0 or not cfg.use_lora:
+        raise ValueError("Require positive update/checkpoint budgets, nonnegative eval interval and LoRA")
     devices = active_cuda_devices(cfg, torch.cuda.device_count())
     if FLAGS.scalable_two_gpu and (torch.cuda.device_count() != 2 or devices != (0, 1)):
         raise ValueError("Scalable workers must see exactly two CUDA devices and use cuda:0/cuda:1")
@@ -366,13 +374,16 @@ def main(_):
     started = time.monotonic()
     run_dir = Path(cfg.logdir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    prompt_bytes = Path(cfg.prompt_fn_kwargs["path"]).read_bytes()
-    prompts = [line.strip() for line in prompt_bytes.decode().splitlines() if line.strip()]
-    prompt_hash = _hash(prompt_bytes)
+    prompts = [record["text"] for record in data.train]
+    prompt_hash = data.fingerprint if data.is_hf else data.train_hash
     config_hash = _hash(json.dumps(cfg.to_dict(), sort_keys=True).encode())
-    if len(prompts) != 200:
-        raise ValueError(f"Expected 200 training prompts, got {len(prompts)}")
-    evaluator = EvaluationMonitor(cfg) if rank == 0 else None
+    if data.is_hf:
+        schedule = data.order(cfg.num_epochs)
+    else:
+        schedule = None
+        if len(prompts) < cfg.num_epochs * 4:
+            raise ValueError("Legacy prompt file is smaller than the configured update schedule")
+    evaluator = EvaluationMonitor(cfg, records=data.evaluation) if rank == 0 else None
     state_path = run_dir / "training_state.pt"
     _trace("resume_checkpoint:enter")
     source_path = Path(FLAGS.resume_from).expanduser().resolve() if FLAGS.resume_from else state_path
@@ -393,6 +404,8 @@ def main(_):
             str(source_path.parent) if FLAGS.resume_from else None,
         )
         reference_root = source_path.resolve().parents[2] if source_path.parent.parent.name == "logs" else None
+        if data.is_hf and state["order"] != schedule:
+            raise ValueError("Resume dataset sampling order mismatch")
         state["reference_files"] = resolve_reference_files(state["reference_files"], ROOT, source_root=reference_root)
     migrations = state.get("topology_migrations", []) if state else []
     if topology_changed:
@@ -405,7 +418,7 @@ def main(_):
         )
     _trace("resume_checkpoint:exit")
     logger = VideoTrainingLogger(
-        run_dir, {**cfg.to_dict(), "execution": {**topology, "placements": placements,
+        run_dir, {**cfg.to_dict(), "dataset_identity": data.metadata, "execution": {**topology, "placements": placements,
                   "topology_migrations": migrations},
                   "monitoring": {"eval_freq": FLAGS.monitor_eval_freq or cfg.eval_freq,
                                  "evaluate_on_resume": FLAGS.evaluate_on_resume,
@@ -451,7 +464,7 @@ def main(_):
         if state is None:
             if rank == 0:
                 nonce = int.from_bytes(os.urandom(8), "big")
-                order = prompt_schedule(prompts, nonce, 4)
+                order = schedule if data.is_hf else prompt_schedule(prompts, nonce, 4)
                 policy.set_adapter("old")
                 refs, tau_id, tau_motion = _calibrate(pipe, roll, reward, cfg, prompts, run_dir)
                 logger.log_event(0, "calibration", {"tau_id": float(tau_id), "tau_motion": float(tau_motion),
@@ -516,6 +529,7 @@ def main(_):
                 topology,
                 migrations,
                 logging_experiment_group=logger.experiment_group,
+                dataset_identity=data.metadata,
             )
             logger.log_event(completed, "checkpoint", {"path": str(state_path)})
         _barrier("startup_barrier")
@@ -546,9 +560,12 @@ def main(_):
             _trace(f"update_{completed + 1}:sampling:enter")
             tuples = []
             for index, rollout_indices in assignments:
-                tuples.extend(
-                    _sample_local(pipe, roll, reward, judge, cfg, prompts[index], index, nonce, refs, rollout_indices)
-                )
+                sample_nonce = deterministic_seed(nonce, completed, index) if data.is_hf else nonce
+                samples = _sample_local(pipe, roll, reward, judge, cfg, prompts[index], index, sample_nonce, refs, rollout_indices)
+                for sample in samples:
+                    sample.update(data.train[index])
+                    sample["record_key"] = data.key(index)
+                tuples.extend(samples)
             local_rollouts = len(tuples)
             _trace(f"update_{completed + 1}:sampling:exit")
             # VideoReward is not used by the differentiable geometry target. Move its
@@ -559,13 +576,15 @@ def main(_):
             gathered = [None] * world
             dist.all_gather_object(
                 gathered,
-                [{key: t[key] for key in ("prompt", "prompt_index", "rollout_index", "r", "m", "p_q")} for t in tuples],
+                [{key: t[key] for key in ("prompt", "prompt_index", "rollout_index", "record_key", "r", "m", "p_q")} for t in tuples],
             )
             flat = canonical_samples(gathered, order, completed, world, single_node_smoke=FLAGS.single_node_smoke)
+            if rank == 0:
+                logger.log_event(completed, "samples", {"records": [data.train[i] for i in order[completed*4:completed*4+4]]})
             global_rollouts = len(flat)
             sample_seconds = time.monotonic() - update_start
             if rank == 0:
-                advantages = tracker.update([entry["prompt"] for entry in flat], np.array([entry["r"] for entry in flat]))
+                advantages = tracker.update([entry["record_key"] for entry in flat], np.array([entry["r"] for entry in flat]))
                 weights = [
                     float(
                         effective_weight(
@@ -710,6 +729,7 @@ def main(_):
                     topology,
                     migrations,
                     logging_experiment_group=logger.experiment_group,
+                    dataset_identity=data.metadata,
                 )
                 logger.log_event(completed, "checkpoint", {"path": str(state_path)})
             _barrier(f"update_{completed}:checkpoint_barrier")
@@ -750,9 +770,11 @@ def _save_state(
     topology,
     migrations,
     logging_experiment_group=None,
+    dataset_identity=None,
 ):
     state = {
         "version": 2,
+        "dataset_identity": dataset_identity,
         "logging_experiment_group": logging_experiment_group,
         "training_config": {**training_config, "logdir": portable_path(training_config["logdir"], ROOT)},
         "training_config_hash": training_config_hash(training_config),

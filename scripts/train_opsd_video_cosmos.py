@@ -20,12 +20,19 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+if "--validate-dataset-only" in sys.argv:
+    from diffusionopsd.video.training_data import validate_dataset_cli
+
+    validate_dataset_cli("config/cosmos_nano.py")
+    raise SystemExit(0)
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model_state_dict, set_peft_model_state_dict
 
 from diffusionopsd.stat_tracking import PerPromptStatTracker
+from diffusionopsd.video.training_data import load_training_data
 from diffusionopsd.video.cosmos_quality import IsolatedVideoJudge
 from diffusionopsd.video.cosmos_rollout import CosmosRollout
 from diffusionopsd.video.cosmos_training import (
@@ -119,6 +126,7 @@ def main():
     if args.max_updates_this_job < 0:
         parser.error("max-updates-this-job must be nonnegative")
     cfg = read_config(args.config)
+    data = load_training_data(cfg, strip_files=False)
     configure_reward(cfg)
     validate_config(cfg)
     model_path, versions = preflight(cfg)
@@ -138,13 +146,18 @@ def main():
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
-    train_prompts = [p for p in Path(cfg.train_prompts).read_text().splitlines() if p.strip()]
-    eval_prompts = [p for p in Path(cfg.eval_prompts).read_text().splitlines() if p.strip()][:cfg.eval_count]
-    if not train_prompts or not eval_prompts:
-        raise ValueError("Training and held-out prompt files must not be empty")
+    train_prompts = [row["text"] for row in data.train]
+    eval_records = data.evaluation[:cfg.eval_count]
+    if len(eval_records) < cfg.eval_count:
+        raise ValueError("Evaluation count exceeds available dataset rows")
+    eval_prompts = [row["text"] for row in eval_records]
+    # One seeded permutation, cycled by the durable sampling-attempt cursor.
+    train_order = data.order(len(train_prompts), 1) if data.is_hf else list(range(len(train_prompts)))
     signature = cfg.to_dict()
-    signature["train_prompt_sha256"] = hashlib.sha256(Path(cfg.train_prompts).read_bytes()).hexdigest()
-    signature["eval_prompt_sha256"] = hashlib.sha256(Path(cfg.eval_prompts).read_bytes()).hexdigest()
+    signature["train_prompt_sha256"] = data.train_hash
+    signature["eval_prompt_sha256"] = data.eval_hash
+    if data.is_hf:
+        signature["dataset_identity"] = data.metadata
     (run_dir / "manifest.json").write_text(json.dumps({"config": signature, "versions": versions}, indent=2))
     resume_update, logging_group = 0, None
     if args.resume:
@@ -284,7 +297,7 @@ def main():
             policy.set_adapter("old")
             if not thresholds:
                 emit("calibration")
-                baseline = [reference(p) for p in train_prompts[:cfg.calibration_prompts]]
+                baseline = [reference(train_prompts[i]) for i in train_order[:cfg.calibration_prompts]]
                 thresholds = {
                     "identity": cfg.tau_id if cfg.tau_id >= 0 else float(np.quantile([s["identity"] for s in baseline], .1)),
                     "motion": cfg.tau_motion if cfg.tau_motion >= 0 else float(np.quantile([s["motion"] for s in baseline], .1)),
@@ -304,7 +317,7 @@ def main():
                         clip = decode(rec.x0)
                         score = geometry(clip)
                         quality = quality_score(clip[0], prompt)
-                        emit("evaluation", update=update, prompt=prompt, seed=seed,
+                        emit("evaluation", update=update, prompt=prompt, seed=seed, **eval_records[i],
                              geo=float(score.geo), base_geo=base["geo"],
                              identity=float(score.s_id), motion=float(score.motion), quality=quality)
                         if cfg.save_videos:
@@ -324,7 +337,9 @@ def main():
             stop_at = min(cfg.updates, completed + args.max_updates_this_job) if args.max_updates_this_job else cfg.updates
             while completed < stop_at:
                 prompt_index, sampling_attempt = prompt_cursor.take()
+                prompt_index = train_order[prompt_index]
                 prompt = train_prompts[prompt_index]
+                record_key = data.key(prompt_index)
                 base = reference(prompt)
                 policy.set_adapter("old")
                 records, rewards, motions, quality_probs = [], [], [], []
@@ -350,7 +365,7 @@ def main():
                          consecutive_empty=prompt_cursor.consecutive_empty + 1)
                 if not prompt_cursor.record_batch(len(records)):
                     continue
-                advantages = tracker.update([prompt]*len(records), np.array(rewards))
+                advantages = tracker.update([record_key]*len(records), np.array(rewards))
                 weights = effective_weight(
                     torch.tensor(advantages), cfg.loss_scale, torch.tensor(motions), thresholds["motion"],
                     torch.tensor(quality_probs), cfg.tau_quality,
@@ -359,7 +374,7 @@ def main():
                 policy.eval()  # LoRA still trains; keep inference/dropout behavior consistent.
                 before = {k: v.detach().clone() for k, v in get_peft_model_state_dict(policy).items()}
                 context = torch.autograd.graph.save_on_cpu() if cfg.offload_saved_tensors else nullcontext()
-                logger.log_event(completed, "sampling", {"generated": cfg.clips_per_prompt,
+                logger.log_event(completed, "sampling", {**data.train[prompt_index], "record_key": record_key, "generated": cfg.clips_per_prompt,
                                  "retained": len(records), "sampling_attempt": sampling_attempt})
                 emit("fitting", update=completed+1, retained=len(records))
                 with context, torch.autocast("cuda", dtype=torch.bfloat16):

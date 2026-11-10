@@ -2,10 +2,12 @@
 
 import ml_collections
 from diffusionopsd.video.geo_reward import reward_metadata
+from diffusionopsd.video.training_data import default_dataset_config
 
 
 def get_config():
     return ml_collections.ConfigDict(dict(
+        dataset=default_dataset_config(),
         geometry_reward=reward_metadata(),
         model="${VIDEO_REWARD_CKPT_PATH}/Cosmos3-Nano",
         model_id="nvidia/Cosmos3-Nano",

@@ -1,4 +1,4 @@
-"""One pass over 200 Wan2.2 prompts, four distributed workers."""
+"""Fifty Wan2.2 updates over the pinned HF prompt pool, four distributed workers."""
 
 from config.wan22_ti2v_debug import get_config as debug_config
 

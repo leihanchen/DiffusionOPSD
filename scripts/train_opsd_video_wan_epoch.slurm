@@ -53,6 +53,9 @@ else
   BINDS=(--bind "$REPO" --bind "$SCRATCH")
 fi
 BINDS+=(--bind "$REPO/src:/opt/venv/lib/python3.12/site-packages/diffusionopsd")
+apptainer exec "${BINDS[@]}" --pwd "$REPO" --env PYTHONNOUSERSITE=1 \
+  --env "HF_HOME=$HF_HOME" --env HF_HUB_OFFLINE=1 "$SIF" \
+  python scripts/prefetch_video_dataset.py --config "$CONFIG" --check-only
 echo "Wan2.2 epoch run=$RUN_ID job=$SLURM_JOB_ID nodes=$SLURM_JOB_NODELIST master=$MASTER_ADDR budget_hours=$JOB_BUDGET_HOURS chain_jobs=$CHAIN_JOBS"
 srun --label --ntasks=4 --ntasks-per-node=1 --kill-on-bad-exit=1 \
   apptainer exec --nv "${BINDS[@]}" --pwd "$REPO" \
@@ -82,7 +85,7 @@ if [[ "$STATUS" == continue && "$CHAIN_JOBS" == 1 ]]; then
 elif [[ "$STATUS" == continue && "$CHAIN_JOBS" == 0 ]]; then
   echo "Probe stopped after update $(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["completed_updates"])' "$RESULT"); no successor submitted"
 elif [[ "$STATUS" == complete ]]; then
-  echo "Full pass completed at update 50"
+  echo "Configured update budget completed"
 else
   echo "Unexpected status: $STATUS" >&2
   exit 1

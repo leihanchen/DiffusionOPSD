@@ -19,6 +19,7 @@ for path in (ROOT / "src", ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
+from diffusionopsd.video.training_data import file_records, load_training_data
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
 from diffusionopsd.video.eval_table import success_table
 from diffusionopsd.video.geo_reward import GeoReward, REWARD_VERSION, reward_metadata
@@ -57,9 +58,28 @@ def main():
     p.add_argument("--policy", required=True)
     p.add_argument("--prompts", default=None)
     p.add_argument("--out", default="eval_video.json")
+    p.add_argument("--num-prompts", type=int, default=None,
+                   help="Default: 64 HF test rows, or all explicit file rows. Zero evaluates the full split.")
     p.add_argument("--config", choices=("wan21", "wan22"), default="wan21")
     a = p.parse_args()
     cfg = _get_config(a.config)
+    if a.prompts:
+        records = file_records(a.prompts)
+        import hashlib
+
+        dataset_identity = {"source": "files", "path": a.prompts,
+                            "eval_hash": hashlib.sha256(Path(a.prompts).read_bytes()).hexdigest()}
+    else:
+        data = load_training_data(cfg)
+        records, dataset_identity = data.evaluation, data.metadata
+    count = (64 if not a.prompts else 0) if a.num_prompts is None else a.num_prompts
+    if count < 0 or count > len(records):
+        p.error("--num-prompts must be zero or a positive count within the available split")
+    if count:
+        records = records[:count]
+    if not records:
+        p.error("Evaluation requires at least one prompt")
+    prompts = [record["text"] for record in records]
     dev = "cuda:0"
     pipe = WanPipeline.from_pretrained(os.path.expandvars(cfg.pretrained.model), torch_dtype=torch.bfloat16).to(dev)
     from diffusionopsd.video.wan_geometry import require_expand_timesteps
@@ -87,9 +107,6 @@ def main():
     pipe.vae.requires_grad_(False)
     reward.requires_grad_(False)
     judge = load_video_reward(cfg.judge.device, num_frames=cfg.judge.num_frames)
-    prompt_path = a.prompts or cfg.eval_prompts
-    with open(prompt_path) as f:
-        prompts = [line.strip() for line in f if line.strip()]
     acc = {
         "base": {"geo": [], "s_id": [], "motion": []},
         "tuned": {"geo": [], "s_id": [], "motion": [], "p_q": []},
@@ -113,7 +130,13 @@ def main():
     means = {s: {k: sum(v) / len(v) for k, v in d.items()} for s, d in acc.items()}
     for values in means.values():
         values["reward_version"] = REWARD_VERSION
-    result = {"reward": reward_metadata(), "n": len(prompts), "means": means, "success": success_table(means["base"], means["tuned"])}
+    scored_records = [
+        {**record, "seed": i, **{side: {key: values[i] for key, values in scores.items()}
+                                for side, scores in acc.items()}}
+        for i, record in enumerate(records)
+    ]
+    result = {"reward": reward_metadata(), "dataset": dataset_identity, "records": scored_records,
+              "n": len(prompts), "means": means, "success": success_table(means["base"], means["tuned"])}
     with open(a.out, "w") as out_f:
         json.dump(result, out_f, indent=2)
     print(json.dumps(result, indent=2))
