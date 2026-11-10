@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from diffusionopsd.video.training_data import evaluation_records
 from diffusionopsd.video.eval_table import success_table
 from diffusionopsd.video.geo_reward import REWARD_VERSION, reward_metadata
 from diffusionopsd.video.quality_judge import gap_to_probability, quality_gap
@@ -76,7 +77,7 @@ def save_video(clip, path, fps):
 class EvaluationMonitor:
     """Fixed prompts/seeds and scalar baseline scores, independent of checkpoints."""
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, records=None):
         self.cfg = cfg
         self.baseline = None
         self.prompts = []
@@ -88,9 +89,11 @@ class EvaluationMonitor:
             raise ValueError("evaluation requires positive eval_num_prompts and 0 <= eval_num_videos <= it")
         if cfg.eval_video_fps <= 0 or cfg.eval_seed < 0:
             raise ValueError("eval_video_fps must be positive and eval_seed nonnegative")
-        prompts = [line.strip() for line in Path(cfg.eval_prompts).read_text().splitlines() if line.strip()]
+        records = evaluation_records(cfg) if records is None else records
+        prompts = [record["text"] for record in records]
         if len(prompts) < cfg.eval_num_prompts:
             raise ValueError(f"evaluation requested {cfg.eval_num_prompts} prompts but found {len(prompts)}")
+        self.records = records[: cfg.eval_num_prompts]
         self.prompts = prompts[: cfg.eval_num_prompts]
 
     def evaluate(self, pipe, policy, roll, reward, judge, update):
@@ -110,7 +113,7 @@ class EvaluationMonitor:
                 clip = generate_clip(pipe, roll, cfg, prompt, seed, device)
                 geometry = reward(clip.to(cfg.reward_device))
                 scores = judge.score(clip[0].to(cfg.judge.device), prompt)
-                row = {"prompt": prompt, "seed": seed, "reward_version": REWARD_VERSION}
+                row = {**self.records[index], "prompt": prompt, "seed": seed, "reward_version": REWARD_VERSION}
                 row.update({key: float(getattr(geometry, key)) for key in ("geo", "s_id", "motion")})
                 row.update({key: float(scores[key]) for key in ("VQ", "MQ", "TA", "Overall")})
                 reference = row if self.baseline is None else self.baseline[index]

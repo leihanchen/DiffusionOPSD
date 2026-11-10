@@ -107,6 +107,10 @@ echo "VIDEO_REWARD_CKPT_PATH=${VIDEO_REWARD_CKPT_PATH}"
 echo "HF_HOME=${HF_HOME}"
 
 # Keep host ~/.local packages from overriding the container's Python stack.
+apptainer exec "${APPTAINER_BINDS[@]}" --pwd "$REPO" --env PYTHONNOUSERSITE=1 \
+  --env "HF_HOME=$HF_HOME" --env HF_HUB_OFFLINE=1 "$SIF" \
+  python scripts/prefetch_video_dataset.py --config config/wan22_ti2v_debug.py --check-only
+
 apptainer exec --nv "${APPTAINER_BINDS[@]}" --pwd "${PWD}" \
   --env PYTHONNOUSERSITE=1 \
   --env "HF_HOME=${HF_HOME}" \

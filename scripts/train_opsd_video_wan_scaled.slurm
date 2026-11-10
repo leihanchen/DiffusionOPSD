@@ -44,6 +44,9 @@ else
   BINDS=(--bind "$REPO" --bind "$SCRATCH")
 fi
 BINDS+=(--bind "$REPO/src:/opt/venv/lib/python3.12/site-packages/diffusionopsd")
+apptainer exec "${BINDS[@]}" --pwd "$REPO" --env PYTHONNOUSERSITE=1 \
+  --env "HF_HOME=$HF_HOME" --env HF_HUB_OFFLINE=1 "$SIF" \
+  python scripts/prefetch_video_dataset.py --config "$CONFIG" --check-only
 export WAN_SCALE_SIF="$SIF" WAN_SCALE_REPO="$REPO"
 # Expansion of CUDA_VISIBLE_DEVICES happens inside the Slurm task after binding.
 srun --label --ntasks="$SLURM_NTASKS" --ntasks-per-node="$WAN_SCALE_WORKERS_PER_NODE" \
@@ -80,7 +83,7 @@ if [[ "$STATUS" == continue && "$WAN_EPOCH_CHAIN_JOBS" == 1 ]]; then
 elif [[ "$STATUS" == continue && "$WAN_EPOCH_CHAIN_JOBS" == 0 ]]; then
   echo "Probe completed; no successor submitted"
 elif [[ "$STATUS" == complete ]]; then
-  echo "Full pass completed at update 50"
+  echo "Configured update budget completed"
 else
   echo "Unexpected status: $STATUS" >&2
   exit 1

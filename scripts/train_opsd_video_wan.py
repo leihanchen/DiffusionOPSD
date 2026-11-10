@@ -20,11 +20,18 @@ for path in (ROOT / "src", ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
+if "--validate-dataset-only" in sys.argv:
+    from diffusionopsd.video.training_data import validate_dataset_cli
+
+    validate_dataset_cli("config/wan_video.py")
+    raise SystemExit(0)
+
 import torch
 from absl import app, flags
 from diffusers import WanPipeline
 from diffusionopsd.ema import EMAModuleWrapper
 from diffusionopsd.stat_tracking import PerPromptStatTracker
+from diffusionopsd.video.training_data import load_training_data
 from diffusionopsd.video.branch_loss import branch_loss
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
 from diffusionopsd.video.gates import effective_weight, identity_keep, percentile_threshold
@@ -61,15 +68,18 @@ def _log_record(record, videos=(), *, logger):
 def main(_):
     cfg = FLAGS.config
     configure_reward(cfg)
-    evaluator = EvaluationMonitor(cfg)  # Validate settings and prompts before loading models.
+    data = load_training_data(cfg)
+    if data.is_hf:
+        data.metadata["sampling_policy"] = "seeded-random-subset-v1"
+    evaluator = EvaluationMonitor(cfg, records=data.evaluation)  # Validate settings and prompts before loading models.
     os.makedirs(cfg.logdir, exist_ok=True)
     model_id = str(cfg.pretrained.model)
     backbone = "wan22" if "wan2.2" in model_id.lower() else "wan21"
-    with VideoTrainingLogger(cfg.logdir, cfg.to_dict(), backbone) as logger:
-        _train(cfg, evaluator, logger)
+    with VideoTrainingLogger(cfg.logdir, {**cfg.to_dict(), "dataset_identity": data.metadata}, backbone) as logger:
+        _train(cfg, evaluator, logger, data)
 
 
-def _train(cfg, evaluator, logger):
+def _train(cfg, evaluator, logger, data):
     dev = "cuda:0"
     model_path = os.path.expandvars(cfg.pretrained.model)
     pipe = WanPipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16, local_files_only=True).to(dev)
@@ -116,20 +126,21 @@ def _train(cfg, evaluator, logger):
         return reward(roll_old.decode01(lat).to(cfg.reward_device)).geo.to(lat.device)
 
     tracker = PerPromptStatTracker(cfg.sample.global_std)
-    with open(cfg.prompt_fn_kwargs["path"]) as f:
-        prompts = [line.strip() for line in f if line.strip()]
+    prompts = [record["text"] for record in data.train]
+    sample_rng = random.Random(data.metadata.get("seed", 42))
     K = cfg.sample.num_image_per_prompt
 
     refs, s_ids, motions = {}, [], []
     with torch.no_grad():
-        for prompt in random.Random(0).sample(prompts, min(cfg.gates.calib_prompts, len(prompts))):
+        for index in random.Random(0).sample(range(len(prompts)), min(cfg.gates.calib_prompts, len(prompts))):
+            prompt, key = prompts[index], data.key(index)
             pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev)[:2]
-            g = torch.Generator(dev).manual_seed(_prompt_seed(prompt))
+            g = torch.Generator(dev).manual_seed(_prompt_seed(key))
             latents = torch.randn(_latent_shape(pipe, cfg), device=dev, dtype=torch.float32, generator=g)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 rec = roll_old.rollout(pe, ne, latents, cfg.opa.query_sigma)
             clip = roll_old.decode01(rec.x0)
-            refs[prompt] = clip[0].cpu()
+            refs[key] = clip[0].cpu()
             out = reward(clip.to(cfg.reward_device))
             s_ids.append(out.s_id.cpu())
             motions.append(out.motion.cpu())
@@ -146,31 +157,39 @@ def _train(cfg, evaluator, logger):
         _log_record({"optimizer_updates": 0, **metrics}, videos, logger=logger)
 
     for epoch in range(cfg.num_epochs):
-        batch_prompts = random.sample(prompts, cfg.sample.num_batches_per_epoch)
+        batch_indices = sample_rng.sample(range(len(prompts)), cfg.sample.num_batches_per_epoch)
         tuples = []
         if cfg.use_lora:
             policy.set_adapter("old")
         else:
             pipe.transformer = behavior
-        for prompt in batch_prompts:
+        for index in batch_indices:
+            prompt, key = prompts[index], data.key(index)
             pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev)[:2]
-            if prompt not in refs:
+            if key not in refs:
                 with torch.no_grad():
-                    g = torch.Generator(dev).manual_seed(_prompt_seed(prompt))
+                    g = torch.Generator(dev).manual_seed(_prompt_seed(key))
                     latents = torch.randn(_latent_shape(pipe, cfg), device=dev, dtype=torch.float32, generator=g)
                     with torch.autocast("cuda", dtype=torch.bfloat16):
                         rec_ref = roll_old.rollout(pe, ne, latents, cfg.opa.query_sigma)
-                    refs[prompt] = roll_old.decode01(rec_ref.x0)[0].cpu()
-            for _ in range(K):
-                latents = torch.randn(_latent_shape(pipe, cfg), device=dev, dtype=torch.float32)
+                    refs[key] = roll_old.decode01(rec_ref.x0)[0].cpu()
+            for repetition in range(K):
+                generator = None
+                if data.is_hf:
+                    generator = torch.Generator(dev).manual_seed(_prompt_seed(
+                        f"{data.metadata['seed']}:{key}:{epoch}:{repetition}"
+                    ))
+                latents = torch.randn(_latent_shape(pipe, cfg), device=dev, dtype=torch.float32, generator=generator)
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     rec = roll_old.rollout(pe, ne, latents, cfg.opa.query_sigma)
                 with torch.no_grad():
                     clip = roll_old.decode01(rec.x0)
                     out = reward(clip.to(cfg.reward_device))
-                    p_q = judge.p_win(clip[0].to(cfg.judge.device), refs[prompt].to(cfg.judge.device), prompt)
+                    p_q = judge.p_win(clip[0].to(cfg.judge.device), refs[key].to(cfg.judge.device), prompt)
                 tuples.append(
                     {
+                        **data.train[index],
+                        "record_key": key,
                         "prompt": prompt,
                         "pe": pe,
                         "ne": ne,
@@ -180,7 +199,8 @@ def _train(cfg, evaluator, logger):
                         "p_q": p_q,
                     }
                 )
-        adv = tracker.update([t["prompt"] for t in tuples], torch.tensor([t["r"] for t in tuples]).numpy())
+        logger.log_event(epoch, "samples", {"records": [{**data.train[i], "record_key": data.key(i)} for i in batch_indices]})
+        adv = tracker.update([t["record_key"] for t in tuples], torch.tensor([t["r"] for t in tuples]).numpy())
         adv = torch.tensor(adv, dtype=torch.float32)
         for t, a in zip(tuples, adv):
             t["w"] = float(
@@ -276,6 +296,8 @@ def _train(cfg, evaluator, logger):
                 state = policy.state_dict()
             checkpoint_path = os.path.join(cfg.logdir, f"policy_{epoch + 1}.pt")
             torch.save(state, checkpoint_path)
+            with open(checkpoint_path + ".dataset.json", "w") as metadata_file:
+                json.dump(data.metadata, metadata_file, indent=2)
             logger.log_event(epoch + 1, "checkpoint", {"path": checkpoint_path})
             print(json.dumps({"checkpoint_saved": checkpoint_path}), flush=True)
             del state

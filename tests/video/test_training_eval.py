@@ -198,3 +198,20 @@ def test_monitoring_interval_can_override_schedule_without_changing_config():
     assert evaluation_due(25, 50, 25, override_freq=0)
     with pytest.raises(ValueError, match="nonnegative"):
         evaluation_due(4, 50, 25, override_freq=-1)
+
+
+def test_evaluation_keeps_selected_source_records(tmp_path, monkeypatch):
+    import json
+
+    records = [dict(text="first prompt", sample_id="record-1", video_source="one.mp4"),
+               dict(text="second prompt", sample_id="record-2", video_source="two.mp4")]
+    monitor = EvaluationMonitor(config(tmp_path, use_lora=False, eval_num_prompts=1), records=records)
+    policy = torch.nn.Linear(1, 1)
+    pipe = SimpleNamespace(transformer=policy, vae=torch.nn.Identity(), text_encoder=torch.nn.Identity())
+    monkeypatch.setattr("diffusionopsd.video.training_eval.generate_clip",
+                        lambda *args: torch.ones(1, 2, 3, 16, 16))
+    monitor.evaluate(pipe, policy, None, Reward(), Judge(), 0)
+    result = json.loads((tmp_path / "eval" / "update_000000.json").read_text())
+    assert monitor.records == records[:1]
+    assert result["prompts"][0]["sample_id"] == "record-1"
+    assert result["prompts"][0]["video_source"] == "one.mp4"
