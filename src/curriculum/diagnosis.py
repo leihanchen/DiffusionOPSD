@@ -63,3 +63,76 @@ def save_frame_evidence(clip, output_dir, *, fps: float, longest_side: int = 448
         image.save(path)
         frames.append(dict(frame_id=index, timestamp=index / fps, path=str(path)))
     return dict(frame_count=clip.shape[0], native_fps=fps, frames=frames)
+
+
+def diagnosis_audit(rows: list[dict], model_id: str, model_revision: str, *, expected_count: int = 12) -> dict:
+    """Summarize a declared pilot size; approval remains a human action."""
+    from collections import Counter, defaultdict
+
+    from diffusionopsd.curriculum.proposer import content_hash
+
+    if expected_count not in {12, 24} or len(rows) != expected_count or len({r['clip_id'] for r in rows}) != expected_count:
+        raise ValueError(f'Diagnosis audit requires {expected_count} distinct clips (supported pilot sizes: 12 or 24)')
+    templates = {r.get('diagnosis_template_hash') for r in rows}
+    if len(templates) != 1 or not next(iter(templates)) or any(not r.get('request_hash') for r in rows):
+        raise ValueError('Audit requires frozen request identities and one diagnosis template')
+    totals = defaultdict(Counter)
+    statuses = {'observed_pass', 'observed_fail', 'unknown'}
+    for row in rows:
+        if not isinstance(row.get('reviewer'), str) or not row['reviewer'].strip():
+            raise ValueError('Independent reviewer identity is required')
+        labels = row['labels']
+        if not labels or any(v not in statuses for v in labels.values()):
+            raise ValueError('Every audited requirement needs an independent label')
+        prediction = validate_diagnosis(row['prediction'], row['frame_ids'], list(labels))
+        for judgment in prediction['requirements']:
+            req, observed = judgment['requirement_id'], judgment['status']
+            count = totals[req]
+            count['count'] += 1
+            count['disagreements'] += observed != labels[req]
+            count['unknown'] += observed == 'unknown'
+            count['false_pass'] += labels[req] == 'observed_fail' and observed == 'observed_pass'
+            count['false_fail'] += labels[req] == 'observed_pass' and observed == 'observed_fail'
+            count['overconfident_on_unknown'] += labels[req] == 'unknown' and observed != 'unknown'
+            count['unknown_on_decidable'] += labels[req] != 'unknown' and observed == 'unknown'
+            count['missing_evidence'] += not judgment['frame_ids']
+            count['label_' + labels[req]] += 1
+            count[labels[req] + '->' + observed] += 1
+    coverage = {k: sorted(status for status in statuses if v['label_' + status] == 0) for k, v in totals.items()}
+    report = dict(model_id=model_id, model_revision=model_revision, clip_count=len(rows),
+                  required_clip_count=expected_count, audit_scope='pilot',
+                  diagnosis_template_hash=next(iter(templates)),
+                  request_hashes=[r['request_hash'] for r in rows],
+                  coverage_complete=all(not missing for missing in coverage.values()),
+                  input_hash=content_hash(rows), requirements={
+                      k: dict(v) | {'missing_human_classes': coverage[k],
+                                    'agreement_rate': 1 - v['disagreements'] / v['count'],
+                                    'unknown_rate': v['unknown'] / v['count'],
+                                    'disagreement_rate': v['disagreements'] / v['count']}
+                      for k, v in totals.items()})
+    report['report_hash'] = content_hash(report)
+    return report | {'approved': False, 'approved_by': ''}
+
+
+def validate_audit_approval(path, model_id: str, revision: str) -> dict:
+    import json
+    from pathlib import Path
+
+    from diffusionopsd.curriculum.proposer import content_hash
+
+    from diffusionopsd.curriculum.vlm import _template
+
+    report = json.loads(Path(path).read_text())
+    active_template_hash = _template({'mode': 'diagnose'})[1]
+    core = {k: v for k, v in report.items() if k not in {'report_hash', 'approved', 'approved_by'}}
+    if (report.get('model_id') != model_id or report.get('model_revision') != revision
+            or report.get('required_clip_count') not in {12, 24}
+            or report.get('clip_count') != report.get('required_clip_count')
+            or report.get('audit_scope') != 'pilot'
+            or report.get('diagnosis_template_hash') != active_template_hash
+            or len(report.get('request_hashes', [])) != report.get('clip_count')
+            or report.get('approved') is not True
+            or not isinstance(report.get('approved_by'), str) or not report['approved_by'].strip()
+            or report.get('report_hash') != content_hash(core)):
+        raise ValueError('Diagnosis audit requires reviewed approval for this model revision and unchanged report')
+    return report

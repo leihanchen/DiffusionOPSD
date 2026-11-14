@@ -54,3 +54,13 @@ def test_development_contract_is_frozen_and_disjoint():
     train = PromptRecord('t', 'd', None, 'train', 'A related scene', 'orbit', {}, 'initial', 0)
     with pytest.raises(ValueError):
         development_contract([p], [train], seed=42, seeds_per_prompt=2, expected_count=1)
+
+
+def test_development_rejects_duplicate_training_text_across_new_lineages():
+    from diffusionopsd.curriculum.records import PromptRecord
+    from diffusionopsd.curriculum.feedback import development_contract
+
+    train = PromptRecord('t', 't', None, 'train', 'A static SCENE', 'orbit', {}, 'initial', 0)
+    dev = PromptRecord('d', 'd', None, 'development', ' A static scene ', 'orbit', {}, 'initial', 0)
+    with pytest.raises(ValueError):
+        development_contract([dev], [train], seed=42, expected_count=1)

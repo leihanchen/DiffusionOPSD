@@ -1,4 +1,6 @@
 """Exercise the actual CLI loop with tiny CPU policy/reward boundaries."""
+from contextlib import contextmanager
+import copy
 from dataclasses import asdict
 import json
 from types import SimpleNamespace
@@ -55,8 +57,8 @@ def trainer(monkeypatch, tmp_path):
         def decode01(self, x):
             return x
 
-        def prediction(self, rec):
-            return rec.y0 + self.policy.weights['default']
+        def prediction(self, rec, transformer=None):
+            return rec.y0 + (transformer or self.policy).weights['default']
 
     class Reward(torch.nn.Module):
         def __init__(self, *args):
@@ -93,7 +95,26 @@ def trainer(monkeypatch, tmp_path):
 
         log_train = log_eval = log_event
 
+    class Replica:
+        def __init__(self, policy, **kwargs):
+            self.model = copy.deepcopy(policy).requires_grad_(False)
+
+        def select(self, name):
+            self.model.set_adapter(name)
+            self.model.requires_grad_(False)
+
+        @contextmanager
+        def active_on(self, device):
+            yield self.model
+
+        def sync(self, policy):
+            self.model.load_state_dict(policy.state_dict())
+            self.model.requires_grad_(False)
+
+    monkeypatch.setattr(m, 'InferenceReplica', Replica)
     cfg = get_config()
+    cfg.dataset.source = 'files'
+    cfg.inference_device = 'cpu'
     cfg.policy_device = cfg.vae_device = cfg.reward_device = cfg.judge_device = 'cpu'
     cfg.num_frames = cfg.reward_frames = 5
     cfg.reward_height = cfg.reward_width = 2
@@ -258,3 +279,35 @@ def test_nonfinite_rejected_feedback_exports_as_unknown(trainer, monkeypatch, tm
     report = json.loads((run_dir / 'round_feedback.json').read_text())
     assert all(r['mean_geo'] is None for r in report['prompts'].values())
     assert json.loads((run_dir / 'training_feedback.json').read_text())[0]['geo'] is None
+
+
+def test_curriculum_does_not_load_default_hf_training_data(trainer, monkeypatch, tmp_path):
+    m, cfg = trainer
+    cfg.dataset.source = 'hf'
+    cfg.tau_id = 2.
+
+    def unwanted_dataset_load(*args, **kwargs):
+        raise AssertionError('Curriculum manifests must not require the default HF dataset')
+
+    monkeypatch.setattr(m, 'load_training_data', unwanted_dataset_load)
+    path = tmp_path / 'train.json'
+    manifest(path)
+    state = run(monkeypatch, m, tmp_path / 'run', path)
+    assert state['extra']['round_cursor']['next_index'] == 2
+
+
+def test_legacy_hf_dataset_keeps_identity_metadata(trainer, monkeypatch, tmp_path):
+    from diffusionopsd.video.training_data import TrainingData
+
+    m, cfg = trainer
+    cfg.updates = 1
+    data = TrainingData(train=[{'text': 'Pinned training scene', 'sample_id': 'sample-1'}],
+                        evaluation=[{'text': 'Pinned independent scene', 'sample_id': 'eval-1'}],
+                        metadata={'seed': 42, 'revision': 'a' * 40},
+                        train_hash='train-content-hash', eval_hash='eval-content-hash')
+    monkeypatch.setattr(m, 'load_training_data', lambda *args, **kw: data)
+    state = run(monkeypatch, m, tmp_path / 'hf-run')
+    assert state['update'] == 1
+    assert state['config']['dataset_identity']['revision'] == 'a' * 40
+    assert state['config']['train_prompt_sha256'] == 'train-content-hash'
+    assert state['config']['eval_prompt_sha256'] == 'eval-content-hash'

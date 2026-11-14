@@ -58,7 +58,7 @@ def test_transition_preserves_invariants_requires_completed_previous_round():
     old = {'model': 'nano', 'learning_rate': 1e-5, 'train_prompt_sha256': 'a',
            'curriculum_round': 0, 'curriculum_manifest_hash': 'a'}
     new = old | {'train_prompt_sha256': 'b', 'curriculum_manifest_hash': 'b', 'curriculum_round': 1}
-    state = {'config': old, 'extra': {'round_cursor': {'order': [0, 1], 'next_index': 2}}}
+    state = {'config': old, 'extra': {'round_cursor': {'order': [0, 1], 'next_index': 2}, 'development_done': True}}
     validate_round_transition(state, new)
     with pytest.raises(ValueError):
         validate_round_transition(state, new | {'learning_rate': 2e-5})
@@ -67,3 +67,11 @@ def test_transition_preserves_invariants_requires_completed_previous_round():
     state['extra']['round_cursor']['next_index'] = 1
     with pytest.raises(ValueError):
         validate_round_transition(state, new)
+
+
+def test_transition_rejects_training_complete_but_development_uncommitted():
+    old = {'model': 'nano', 'curriculum_round': 0}
+    state = {'config': old, 'extra': {'round_cursor': {'order': [0], 'next_index': 1},
+                                     'development_done': False}}
+    with pytest.raises(ValueError, match='development'):
+        validate_round_transition(state, old | {'curriculum_round': 1})

@@ -190,3 +190,6 @@ def validate_round_transition(state: dict, config: dict) -> None:
     cursor = state['extra'].get('round_cursor')
     if cursor is None or cursor['next_index'] != len(cursor['order']):
         raise ValueError('Previous round is not complete')
+
+    if state['extra'].get('development_done') is not True:
+        raise ValueError('Previous round development evaluation is not committed')

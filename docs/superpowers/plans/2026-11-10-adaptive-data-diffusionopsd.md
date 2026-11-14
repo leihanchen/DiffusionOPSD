@@ -57,7 +57,7 @@ Revised November 14, 2026 after repository and resource inspection. This replace
 | Visual input | 8 ordered frames/clip including endpoints, longest side at most 448 pixels; timestamps retained |
 | Diagnosis | Greedy, max 1,024 output tokens; visible evidence and unknown judgments |
 | Proposal | Temperature 0.7/top-p 0.9; seeded, 4 candidates/request, max 2,048 output tokens |
-| Initial feedback | Numeric metrics plus VLM observations after a 24-clip independent diagnosis audit; numeric-only control |
+| Initial feedback | Numeric metrics plus VLM observations after a 12-clip independent diagnosis audit; numeric-only control |
 | Optional diagnostic arm | Four audited training queries per round |
 
 These counts are proposed engineering defaults, not statistically validated sample sizes. This is an operational pilot, not evidence sufficient for all proposal hypotheses. Report uncertainty; do not declare mastery from four successful generations. Runtime is measured in the smoke test before assigning a full GPU-hour cap.
@@ -75,7 +75,7 @@ The hardware inventory below is user-supplied. Availability does not imply that 
 | `narval_gemma12` (first implementation) | 4 × A100 40 GB per node | One Cosmos worker: policy on local GPU 0; VAE/reward/judge on local GPU 1 | `google/gemma-4-12B-it`, BF16, batch 1, on one GPU after training/evaluation exits | Baseline, smoke, and first complete pilot; use only 2 allocated GPUs when sequential phases suffice |
 | `narval_parallel_arms` (optional) | Same four-device node; requires exclusive, non-overlapping device assignments | Two independent two-GPU workers, one per experimental arm; each writes its own run directory | Same Gemma 12B; VLM phases wait until their assigned devices are released | Run control/adaptive arms or seeds concurrently; neither worker is a distributed replica of the other |
 | `h200_gemma12_control` | 8 H200 nodes available in the environment; per-node inventory and allocation quota unconfirmed | Start with the same two-device layout on one node if at least two GPUs/node are verified | Same pinned Gemma 12B and input/decoding limits as Narval | Hardware transfer smoke and matched-model comparisons; extra nodes run independent seeds/arms |
-| `h200_qwen27_comparison` (optional) | Same H200 environment; verify per-device memory and runtime first | Preserve the validated Cosmos layout and sequential phase boundary | `Qwen/Qwen3.8-27B`, BF16, batch 1, initially one device only if measured memory permits | Separate model-capacity comparison after its own 24-clip diagnosis audit |
+| `h200_qwen27_comparison` (optional) | Same H200 environment; verify per-device memory and runtime first | Preserve the validated Cosmos layout and sequential phase boundary | `Qwen/Qwen3.8-27B`, BF16, batch 1, initially one device only if measured memory permits | Separate model-capacity comparison after its own 12-clip diagnosis audit |
 
 **Recommended progression:** run `narval_gemma12` first, transfer that exact configuration to `h200_gemma12_control`, then consider the Qwen comparison. The H200 configuration is an alternative execution target, not a prerequisite for implementing the pilot. If only one GPU per H200 node is available, the existing two-device Cosmos layout is not directly runnable there: validate a separately configured single-device layout before use, or keep training on Narval. Cross-node tensor/model parallelism and distributed Cosmos optimization require a separate implementation plan.
 
@@ -137,7 +137,7 @@ Run commands below from this worktree after exporting those paths. The wrapper l
 1. Resolve and download an immutable `google/gemma-4-12B-it` checkpoint revision on an online node, pin a separate VLM runtime, and verify both modes offline. Set `CURRICULUM_VLM_MODEL_PATH` and the worker runtime; never silently fall back to another model. This plan update performs no download or installation.
 2. Select `narval_gemma12` or a fully resolved H200 profile, a valid GPU partition/account, and an initial single-node smoke allocation. Narval needs two GPUs for the sequential default. Discover the H200 per-node inventory first; existing Slurm settings are historical defaults, not verified current entitlement.
 3. Record a total experiment cost cap from measured smoke throughput. Stop at phase boundaries; never describe an unmeasured cap as sufficient.
-4. Complete the 24-clip diagnosis audit before VLM-based curriculum selection. Physics extensions still require physically grounded evaluators beyond VLM judgments. Numeric-only feedback remains an experimental control.
+4. Complete the 12-clip diagnosis audit before VLM-based curriculum selection. Physics extensions still require physically grounded evaluators beyond VLM judgments. Numeric-only feedback remains an experimental control.
 
 ## File map
 
@@ -211,17 +211,63 @@ Run commands below from this worktree after exporting those paths. The wrapper l
 
 **Interfaces:** Worker requests include `mode: diagnose | propose`; `run_requests(requests: list[dict], model: object, processor: object) -> list[dict]` handles both with one model load and no conversational state between requests. `propose(request: dict, command: list[str], output_dir: Path, timeout_seconds: int) -> list[PromptRecord]`. The executable receives `--request PATH --response PATH`; the request includes schema, model/template identity, domain, allowed edits, allocations, and permitted feedback. It emits strict JSON with candidate records and usage metadata.
 
-- [ ] Write tests with a fixture executable for malformed JSON, timeout, duplicate text, wrong parent, cross-split edits, and replay from a completed receipt.
-- [ ] Run the focused tests and confirm failure before implementation.
-- [ ] Implement subprocess arguments without shell interpolation; validate every response with Task 1. Bound repairs to two additional attempts. Stop visibly if the manifest remains incomplete; do not relax gates silently.
-- [ ] Implement a local Transformers worker using one frozen `google/gemma-4-12B-it` checkpoint/processor. Use BF16, batch size one, eval/no-grad, a pinned revision, local-only loading, and Gemma-specific non-thinking chat-template controls. Both roles use the same checkpoint. Do not upgrade the shared Cosmos or VideoReward environments. Default to `narval_gemma12`: target one A100 40 GB in a separate phase after releasing diffusion and reward processes. Resolve model and device placement from the selected execution profile. The H200 Gemma control uses the same checkpoint and budgets; Qwen is an explicitly selected separate arm with its own model-specific processor/template and audit, not a fallback. Google's approximate 26.7 GB BF16 figure does not guarantee fit for our visual-token/context workload. Measure actual peak memory and schema validity. If OOM occurs, stop and record the failure; test a separately recorded smaller visual/context budget rather than silently changing model or precision.
-- [ ] Diagnosis sees one clip's selected frames/timestamps and requirements, without numerical scores or future edit suggestions. Proposal sees saved reports and quotas in a fresh text-only request. Validate separate schemas, request-mode dispatch, no cross-request history, and identical model revision for both roles. Use the decoding and frame limits in the pilot table, timeout 300 seconds/request, and at most two repair attempts.
-- [ ] Audit diagnosis on 24 clips balanced across independently labeled G1 requirement outcomes; include ambiguous examples. Store reviewer labels, per-requirement disagreement, missing evidence, and unknown rates. Review this report before enabling semantic edits; no physics certification follows from agreement. If accuracy is inadequate, keep numeric-only selection and record the failed VLM arm.
-- [ ] Compose G1 tasks by changing one of object/scene, camera path, viewpoint range, or clutter. Preserve static-scene assumptions. Record the intended edit; VLM self-validation is a judgment, not certified scene feasibility. Freeze development/test requests before feedback-driven synthesis.
-- [ ] Cache completed responses by request/template/model hashes. Atomically record attempts and costs; ambiguous interrupted external calls remain unknown and are reconciled before retry.
-- [ ] Run `bash scripts/run_cosmos_python.sh -m pytest tests/curriculum/test_proposer.py tests/curriculum/test_diagnosis.py tests/curriculum/test_vlm_worker.py -q`; expect fixture-backed tests to PASS. Run real worker smoke tests in the separate VLM runtime. Commit `feat(curriculum): add shared visual diagnosis and prompt generation worker`.
+- [x] Write tests with a fixture executable for malformed JSON, timeout, duplicate text, wrong parent, cross-split edits, and replay from a completed receipt.
+- [x] Run the focused tests and confirm failure before implementation.
+- [x] Implement subprocess arguments without shell interpolation; validate every response with Task 1. Bound repairs to two additional attempts. Stop visibly if the manifest remains incomplete; do not relax gates silently.
+- [x] Implement a local Transformers worker using one frozen `google/gemma-4-12B-it` checkpoint/processor. Use BF16, batch size one, eval/no-grad, a pinned revision, local-only loading, and Gemma-specific non-thinking chat-template controls. Both roles use the same checkpoint. Do not upgrade the shared Cosmos or VideoReward environments. Default to `narval_gemma12`: target one A100 40 GB in a separate phase after releasing diffusion and reward processes. Resolve model and device placement from the selected execution profile. The H200 Gemma control uses the same checkpoint and budgets; Qwen is an explicitly selected separate arm with its own model-specific processor/template and audit, not a fallback. Google's approximate 26.7 GB BF16 figure does not guarantee fit for our visual-token/context workload. Measure actual peak memory and schema validity. If OOM occurs, stop and record the failure; test a separately recorded smaller visual/context budget rather than silently changing model or precision.
+- [x] Diagnosis sees one clip's selected frames/timestamps and requirements, without numerical scores or future edit suggestions. Proposal sees saved reports and quotas in a fresh text-only request. Validate separate schemas, request-mode dispatch, no cross-request history, and identical model revision for both roles. Use the decoding and frame limits in the pilot table, timeout 300 seconds/request, and at most two repair attempts.
+- [ ] Audit diagnosis on the 12 existing candidates after G1 eligibility review. Seek successful, failed, and ambiguous outcomes; report missing classes explicitly. Store reviewer labels, per-requirement disagreement, missing evidence, and unknown rates. Review this report before enabling semantic edits; no physics certification follows from agreement. If accuracy is inadequate, keep numeric-only selection and record the failed VLM arm.
+- [x] Compose G1 tasks by changing one of object/scene, camera path, viewpoint range, or clutter. Preserve static-scene assumptions. Record the intended edit; VLM self-validation is a judgment, not certified scene feasibility. Freeze development/test requests before feedback-driven synthesis.
+- [x] Cache completed responses by request/template/model hashes. Atomically record attempts and costs; ambiguous interrupted external calls remain unknown and are reconciled before retry.
+- [x] Run `bash scripts/run_cosmos_python.sh -m pytest tests/curriculum/test_proposer.py tests/curriculum/test_diagnosis.py tests/curriculum/test_vlm_worker.py -q`; expect fixture-backed tests to PASS. Real worker GPU smoke passed for both roles in job 9366379; see measured evidence below. Commit `feat(curriculum): add shared visual diagnosis and prompt generation worker`.
 
 **Deliverable:** One local frozen checkpoint supplies evidence-linked visual reports and controlled prompts. Verify a text-only proposal and a multimodal diagnosis on GPU; record peak memory, versions, immutable model revision, and latency. Merely importing the class is insufficient.
+
+**Implementation evidence (Tasks 1–4):** Code and CPU boundary tests are implemented; see
+[worker usage](../../research/curriculum-worker-usage.md) for executable interfaces and resource gates.
+The worker enforces one frozen checkpoint, local-only loading, bounded input/output, separate role
+messages, durable receipts, and reviewed audit approval before using semantic feedback. Independent
+code review found and regression-tested development text leakage, premature round transition,
+template-cache invalidation, and missing failed-inference cost records. These boundary fixes are
+included in the fourth task commit so the requested one-commit-per-task history is preserved.
+
+- [x] Run real text-only proposal and multimodal diagnosis GPU smokes, recording actual memory, latency, versions, and pinned model identity.
+
+**Resource and processor preflight (November 14):** The official Gemma snapshot is staged at
+revision `43c9d014b231474fa7212dbb48a762566c2b255d` (23,919,549,408 weight bytes).
+The isolated VLM launcher references the existing pinned packages through a separate runtime
+path; source training/reward environments were not modified. Verified versions are torch
+2.14.0+cu130, Transformers 5.22.1, Accelerate 1.12.0, huggingface-hub 1.32.0,
+and safetensors 0.8.0. Real processor checks passed: proposal 236 input tokens;
+eight-frame diagnosis 2,472 input tokens including 2,112 visual tokens. These checks
+validate preprocessing only, not model generation or diagnosis quality.
+
+**GPU smoke evidence (November 14):** Final job `9366379` completed successfully on an
+NVIDIA A100-SXM4-40GB (driver 580.178.04). Both schema-valid requests used the same
+frozen revision and one model load (26.10 seconds). Proposal: 236 input/184 output tokens,
+11.94 seconds, peak allocation 24,092,865,024 bytes. Eight-frame diagnosis: 2,546 input
+tokens including 2,112 visual tokens, 381 output tokens, 22.74 seconds, peak allocation
+25,221,738,496 bytes. Both passed on the first attempt. No input/output truncation or
+precision/model fallback occurred. These figures verify this bounded smoke workload,
+not general accuracy, throughput, or arbitrary context fit.
+
+Earlier job `9364669` generated answers but failed parsing; diagnostic job `9365783`
+confirmed a single JSON Markdown fence around each answer and quoted diagnosis frame IDs.
+The worker now normalizes exactly one complete JSON fence, records that normalization,
+and applies unchanged record/evidence validators; extra prose and multiple JSON documents
+remain invalid. The diagnosis template explicitly requires integer frame IDs and separates
+object stationarity from camera motion. Invalid outputs return a nonzero process exit after
+saving costs, and the proposer still bounds repairs to two additional attempts. Cache schema
+version 2 avoids replaying the old invalid answers. The curriculum suite has 68 passing tests.
+
+**Pending execution evidence:** A balanced independent 12-clip diagnosis audit and human
+approval remain missing. The user selected a 12-clip pilot; those unlabeled legacy training-source candidates are indexed;
+an explicitly blank independent-label template is prepared. No labels or approval are
+fabricated. Semantic curriculum edits remain gated. Local evidence is in ignored
+`logs/curriculum-preflight/verified_smoke.json`, `fixed_response.json`, and
+`independent_labels_template.json`. Model assets remain under
+`/lustre06/project/6062393/leihan/DiffusionOPSD/logs/curriculum-preflight-2807/`.
+
 
 ## Stage 3 — Operational pilot
 
@@ -284,7 +330,7 @@ Both commands above were executed successfully during this plan revision using t
 
 ## Implementation readiness conclusion
 
-There is enough detail to begin fixture-backed implementation of Tasks 1–4 and runner development. The recommended shared VLM is now named, but real synthesis and visual diagnosis require its weights, isolated runtime, working worker, and GPU smoke. End-to-end video training requires a GPU allocation, current environment checks, and a measured budget. Calibrated semantic pass/fail and broader physics claims remain deferred. The pilot records attributed VLM observations and checks them against an independent 24-clip audit before using them to guide task edits.
+There is enough detail to begin fixture-backed implementation of Tasks 1–4 and runner development. The recommended shared VLM is now named, but real synthesis and visual diagnosis require its weights, isolated runtime, working worker, and GPU smoke. End-to-end video training requires a GPU allocation, current environment checks, and a measured budget. Calibrated semantic pass/fail and broader physics claims remain deferred. The pilot records attributed VLM observations and checks them against an independent 12-clip audit before using them to guide task edits.
 
 This plan was self-reviewed against the research proposal and subsequent discussion. The broad proposal remains the research roadmap; this document deliberately defines only the implementable first pilot plus one optional diagnostic arm.
 
@@ -296,4 +342,18 @@ The bounded starting request remains eight frames at at most 448 pixels on the l
 
 **Deferred comparison: `Qwen/Qwen3.8-27B`.** Its BF16 weights alone exceed a single 40 GB device. Larger-memory or explicitly validated multi-GPU execution belongs to a separate future arm; no Qwen allocation is required for the Gemma pilot. [Official model card](https://huggingface.co/Qwen/Qwen3.8-27B).
 
-Neither model has been downloaded or benchmarked for this project. Pin the Gemma checkpoint revision and isolated dependencies, run text-only and visual GPU smoke tests, and complete the diagnosis audit. The existing Cosmos preflight and 18 passing tests predate VLM integration and do not establish Gemma readiness.
+Gemma is staged and both GPU role smokes passed as recorded above; Qwen remains untested. Job 9375184 additionally produced 12 schema-valid diagnoses on the first attempt each (282.91 seconds total generation, peak 25,226,742,784 allocated bytes). Human labels and approval remain pending; model execution alone does not establish diagnosis accuracy.
+
+## Twelve-clip audit revision
+
+The user selected the 12 existing candidates for the initial pilot. The default audit now
+requires 12 distinct clips, with an explicit 24-clip option for expansion. Missing human
+classes are reported as coverage gaps rather than preventing a diagnostic report; approval
+remains an explicit human decision. See [human review guide](../../research/diagnosis-pilot-review.md)
+for the blind 48-judgment workflow and requirement-level disagreement review.
+
+The review packet now contains all 12 videos, 96 selected frames, and a blind HTML form
+exporting 48 judgments with frozen request identities. `scripts/audit_curriculum_diagnosis.py`
+joins that export to the saved Gemma batch and emits unapproved requirement-level counts,
+coverage gaps, and disagreement details. Approval is bound to the audited diagnosis
+template; changing the rubric requires renewed review.

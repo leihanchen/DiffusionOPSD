@@ -10,6 +10,7 @@ from copy import deepcopy
 def get_config() -> dict:
     return dict(prompts_per_round=32, clips_per_prompt=4, rounds=3, seed=42,
                 development_prompts=8, development_seeds=2, test_prompts=16, test_seeds=2,
+                audit_clip_count=12,
                 allocation=dict(retained=8, edited=12, rehearsal=4, new=8),
                 subtypes=['orbit', 'dolly', 'lateral'], calibration_split='train',
                 proposer_command=None, execution_profile=None)

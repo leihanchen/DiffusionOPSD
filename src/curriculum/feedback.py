@@ -80,7 +80,12 @@ def development_contract(records, training_history, *, seed: int, seeds_per_prom
 
     from diffusionopsd.curriculum.records import manifest_hash, validate_manifest
 
+    from diffusionopsd.curriculum.records import normalized_text
+
     validate_manifest(records, [])
+    other_texts = {normalized_text(r.text) for r in training_history if r.split != 'development'}
+    if any(normalized_text(r.text) in other_texts for r in records):
+        raise ValueError('Development text duplicates another partition')
     if (len(records) != expected_count or seeds_per_prompt < 1
             or any(r.split != 'development' for r in records)):
         raise ValueError('Development manifest size/split or seed count is invalid')
