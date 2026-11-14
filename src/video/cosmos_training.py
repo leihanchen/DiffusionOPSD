@@ -44,16 +44,15 @@ class PromptCursor:
 
 
 def validate_cuda_devices(devices, *, visible_count):
-    """Permit shared GPUs while rejecting unavailable configured indices."""
-    parsed = [torch.device(device) for device in devices]
-    if not parsed or any(device.type != "cuda" for device in parsed):
-        raise ValueError("Cosmos training devices must be CUDA devices")
-    required = max(device.index or 0 for device in parsed) + 1
-    if visible_count < required:
-        raise ValueError(f"Configured Cosmos devices require at least {required} visible GPUs; found {visible_count}")
+    """Validate policy first, then all frozen components on the inference GPU."""
+    from diffusionopsd.video.device_layout import validate_two_gpu_layout
+
+    if not devices:
+        raise ValueError("Trainable policy must use explicit cuda:0")
+    validate_two_gpu_layout(devices[0], devices[1:], visible_count=visible_count)
 
 
-def fit_queries(rollout, records, weights, reward_fn, optimizer, cfg, progress=None):
+def fit_queries(rollout, records, weights, reward_fn, optimizer, cfg, progress=None, policy=None):
     """Fit detached reward targets at saved queries; never differentiate rollouts."""
     if not records or len(records) != len(weights):
         raise ValueError("queries and weights must be nonempty and have the same length")
@@ -84,7 +83,7 @@ def fit_queries(rollout, records, weights, reward_fn, optimizer, cfg, progress=N
         if not torch.isfinite(positive).all() or not torch.isfinite(negative).all():
             raise RuntimeError("Targets must be finite")
         report("policy_forward")
-        prediction = rollout.prediction(rec)
+        prediction = rollout.prediction(rec) if policy is None else rollout.prediction(rec, transformer=policy)
         loss = branch_loss(prediction, y0, positive, negative, y0.new_tensor([weight]), cfg.beta).mean()
         if not torch.isfinite(loss):
             raise RuntimeError("Policy loss must be finite")

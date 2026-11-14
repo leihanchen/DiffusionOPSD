@@ -7,7 +7,8 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=192G
-#SBATCH --gres=gpu:a100:2
+#SBATCH --gpus-per-node=a100:2
+#SBATCH --ntasks-per-node=1
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
@@ -26,4 +27,5 @@ ARGS=(--config "${COSMOS_CONFIG:-config/cosmos_nano.py}" --run-dir "$RUN_DIR"
 [[ "${COSMOS_RESUME:-0}" == 1 ]] && ARGS+=(--resume)
 COSMOS_USE_GPU=0 bash scripts/run_cosmos_python.sh scripts/prefetch_video_dataset.py \
   --config "${COSMOS_CONFIG:-config/cosmos_nano.py}" --check-only
-bash scripts/run_cosmos_python.sh scripts/train_opsd_video_cosmos.py "${ARGS[@]}"
+srun --ntasks=1 --gpus-per-task=a100:2 --gpu-bind=per_task:2 --kill-on-bad-exit=1 \
+  bash scripts/run_cosmos_python.sh scripts/train_opsd_video_cosmos.py "${ARGS[@]}"

@@ -16,8 +16,8 @@
 # gpubase_bygpu_b1 caps at 3 hours, so 4 hours must use b2 (12-hour max).
 #
 # Narval GPUs are A100-40GB, not H100. The trainer uses cuda:0 for the policy,
-# cuda:1 for rewards, and cuda:2 for the differentiable VAE decode. A separate
-# VAE GPU avoids the measured 40GB peak on cuda:0 during geometry backward.
+# cuda:1 for the frozen inference replica, text encoder, VAE and all rewards.
+# Each worker owns exactly two GPUs; no three-GPU layout is supported.
 # Keep 24 CPUs and 240G; the prior run used less than 60G of host memory.
 # Do not name a node.
 #SBATCH --job-name=wan22-opsd
@@ -27,7 +27,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=240G
-#SBATCH --gpus-per-node=a100:3
+#SBATCH --gpus-per-node=a100:2
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err

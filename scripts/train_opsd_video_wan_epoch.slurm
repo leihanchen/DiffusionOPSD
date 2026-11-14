@@ -10,7 +10,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=448G
-#SBATCH --gpus-per-node=a100:3
+#SBATCH --gpus-per-node=a100:2
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
@@ -46,7 +46,7 @@ module load apptainer
 set -u
 export MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -1)"
 export MASTER_PORT="$((20000 + SLURM_JOB_ID % 20000))"
-export WORLD_SIZE=4
+export WORLD_SIZE="$SLURM_NTASKS"
 if [[ "$REPO" == "$SCRATCH" || "$REPO" == "$SCRATCH"/* ]]; then
   BINDS=(--bind "$SCRATCH")
 else
@@ -57,7 +57,8 @@ apptainer exec "${BINDS[@]}" --pwd "$REPO" --env PYTHONNOUSERSITE=1 \
   --env "HF_HOME=$HF_HOME" --env HF_HUB_OFFLINE=1 "$SIF" \
   python scripts/prefetch_video_dataset.py --config "$CONFIG" --check-only
 echo "Wan2.2 epoch run=$RUN_ID job=$SLURM_JOB_ID nodes=$SLURM_JOB_NODELIST master=$MASTER_ADDR budget_hours=$JOB_BUDGET_HOURS chain_jobs=$CHAIN_JOBS"
-srun --label --ntasks=4 --ntasks-per-node=1 --kill-on-bad-exit=1 \
+srun --label --ntasks="$SLURM_NTASKS" --ntasks-per-node="${SLURM_NTASKS_PER_NODE:-1}" \
+  --gpus-per-task=a100:2 --gpu-bind=per_task:2 --kill-on-bad-exit=1 \
   apptainer exec --nv "${BINDS[@]}" --pwd "$REPO" \
     --env "WANDB_ENTITY=$WANDB_ENTITY" --env "WANDB_PROJECT=$WANDB_PROJECT" \
     --env "WANDB_CLUSTER_NAME=$WANDB_CLUSTER_NAME" --env "WANDB_RUN_PURPOSE=${WANDB_RUN_PURPOSE:-}" \
@@ -67,7 +68,7 @@ srun --label --ntasks=4 --ntasks-per-node=1 --kill-on-bad-exit=1 \
     --env "VIDEO_REWARD_CKPT_PATH=$VIDEO_REWARD_CKPT_PATH" --env "XDG_CACHE_HOME=$XDG_CACHE_HOME" \
     --env "MASTER_ADDR=$MASTER_ADDR" --env "MASTER_PORT=$MASTER_PORT" \
     "$SIF" python scripts/train_opsd_video_wan_epoch.py \
-      --config "$CONFIG" \
+      --config "$CONFIG" --scalable_two_gpu=true \
       --config.logdir="$RUN_DIR" --job_budget_hours="$JOB_BUDGET_HOURS" \
       --distributed_timeout_minutes="${WAN_EPOCH_DISTRIBUTED_TIMEOUT_MINUTES:-180}" \
       --max_updates_this_job="${WAN_EPOCH_MAX_UPDATES:-0}" \

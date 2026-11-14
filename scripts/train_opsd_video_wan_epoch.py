@@ -39,6 +39,7 @@ from diffusionopsd.stat_tracking import PerPromptStatTracker
 from diffusionopsd.video.training_data import load_training_data
 from diffusionopsd.video.nccl_network import configure_socket_interface
 from diffusionopsd.video.branch_loss import branch_loss
+from diffusionopsd.video.device_layout import InferenceReplica, encode_wan_prompt
 from diffusionopsd.video.distributed_epoch import (
     active_cuda_devices,
     adapter_fingerprint,
@@ -164,11 +165,11 @@ def _calibrate(pipe, roll, reward, cfg, prompts, run_dir):
     s_ids, motions = [], []
     for index in random.Random(0).sample(range(len(prompts)), cfg.gates.calib_prompts):
         prompt = prompts[index]
-        pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device="cuda:0")[:2]
-        generator = torch.Generator("cuda:0").manual_seed(_prompt_seed(prompt))
+        pe, ne = encode_wan_prompt(pipe, prompt, negative_prompt="", do_classifier_free_guidance=True, device="cuda:1")[:2]
+        generator = torch.Generator("cuda:1").manual_seed(_prompt_seed(prompt))
         noise = torch.randn(
             latent_shape_from_pipe(pipe, cfg.video.num_frames, cfg.video.height, cfg.video.width),
-            device="cuda:0",
+            device="cuda:1",
             dtype=torch.float32,
             generator=generator,
         )
@@ -189,14 +190,14 @@ def _calibrate(pipe, roll, reward, cfg, prompts, run_dir):
 
 
 def _sample_local(pipe, roll, reward, judge, cfg, prompt, prompt_index, nonce, reference_files, rollout_indices):
-    pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device="cuda:0")[:2]
+    pe, ne = encode_wan_prompt(pipe, prompt, negative_prompt="", do_classifier_free_guidance=True, device="cuda:1")[:2]
     if prompt_index in reference_files:
         reference = torch.load(reference_files[prompt_index], map_location="cpu", weights_only=True)
     else:
-        generator = torch.Generator("cuda:0").manual_seed(_prompt_seed(prompt))
+        generator = torch.Generator("cuda:1").manual_seed(_prompt_seed(prompt))
         noise = torch.randn(
             latent_shape_from_pipe(pipe, cfg.video.num_frames, cfg.video.height, cfg.video.width),
-            device="cuda:0",
+            device="cuda:1",
             dtype=torch.float32,
             generator=generator,
         )
@@ -206,10 +207,10 @@ def _sample_local(pipe, roll, reward, judge, cfg, prompt, prompt_index, nonce, r
         del noise, rec_ref
     tuples = []
     for repetition in rollout_indices:
-        generator = torch.Generator("cuda:0").manual_seed(deterministic_seed(nonce, prompt_index, repetition))
+        generator = torch.Generator("cuda:1").manual_seed(deterministic_seed(nonce, prompt_index, repetition))
         latents = torch.randn(
             latent_shape_from_pipe(pipe, cfg.video.num_frames, cfg.video.height, cfg.video.width),
-            device="cuda:0",
+            device="cuda:1",
             dtype=torch.float32,
             generator=generator,
         )
@@ -283,7 +284,7 @@ def _targets_and_gradients(tuples, weights, roll, reward, policy, opt, cfg, tau_
             sample["y0"],
             sample["y_plus"],
             sample["y_minus"],
-            torch.tensor([sample["weight"]], device="cuda:0"),
+            torch.tensor([sample["weight"]], device=rec.z_q.device),
             cfg.beta,
         ).mean()
         local_loss += float(loss.detach())
@@ -430,7 +431,9 @@ def main(_):
     with logger:
         model_path = os.path.expandvars(cfg.pretrained.model)
         _trace("wan_model:enter")
-        pipe = WanPipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16, local_files_only=True).to("cuda:0")
+        pipe = WanPipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16, local_files_only=True)
+        pipe.transformer.to(cfg.policy_device)
+        pipe.text_encoder.to(cfg.text_encoder_device)
         _trace("wan_model:exit")
         pipe.vae.requires_grad_(False).to(cfg.vae_device)
         pipe.text_encoder.requires_grad_(False)
@@ -445,6 +448,9 @@ def main(_):
         else:
             _load_adapter(policy, state)
         _trace("adapter_state:exit")
+        inference = InferenceReplica(policy, device=cfg.inference_device)
+        inference.select("default")
+        pipe.transformer = inference.model
         trainable = [p for p in policy.parameters() if p.requires_grad]
         opt = torch.optim.AdamW(trainable, lr=cfg.train.learning_rate, weight_decay=cfg.train.adam_weight_decay)
         if state is not None:
@@ -465,13 +471,13 @@ def main(_):
             if rank == 0:
                 nonce = int.from_bytes(os.urandom(8), "big")
                 order = schedule if data.is_hf else prompt_schedule(prompts, nonce, 4)
-                policy.set_adapter("old")
+                inference.select("old")
                 refs, tau_id, tau_motion = _calibrate(pipe, roll, reward, cfg, prompts, run_dir)
                 logger.log_event(0, "calibration", {"tau_id": float(tau_id), "tau_motion": float(tau_motion),
                                                   "tau_q": cfg.gates.tau_q})
-                policy.set_adapter("default")
+                inference.select("default")
                 with torch.no_grad():
-                    metrics, videos = evaluator.evaluate(pipe, policy, roll, reward, judge, 0)
+                    metrics, videos = evaluator.evaluate(pipe, inference.model, roll, reward, judge, 0)
                 _log({"optimizer_updates": 0, **metrics}, videos, logger=logger)
                 evaluator_state = evaluator.baseline
                 payload = (nonce, order, refs, tau_id, tau_motion, evaluator_state)
@@ -502,7 +508,7 @@ def main(_):
             _trace("rng_restore:exit")
             if rank == 0 and FLAGS.evaluate_on_resume:
                 _trace("resume_evaluation:enter", optimizer_updates=completed)
-                metrics, videos = evaluator.evaluate(pipe, policy, roll, reward, judge, completed)
+                metrics, videos = evaluator.evaluate(pipe, inference.model, roll, reward, judge, completed)
                 _log({"optimizer_updates": completed, **metrics}, videos, logger=logger)
                 _trace("resume_evaluation:exit", optimizer_updates=completed)
         if state is None:
@@ -556,7 +562,7 @@ def main(_):
             assignments = worker_sample_assignments(
                 order, completed, rank, world, single_node_smoke=FLAGS.single_node_smoke
             )
-            policy.set_adapter("old")
+            inference.select("old")
             _trace(f"update_{completed + 1}:sampling:enter")
             tuples = []
             for index, rollout_indices in assignments:
@@ -568,11 +574,6 @@ def main(_):
                 tuples.extend(samples)
             local_rollouts = len(tuples)
             _trace(f"update_{completed + 1}:sampling:exit")
-            # VideoReward is not used by the differentiable geometry target. Move its
-            # frozen weights off the scorer GPU before WAFT recomputes in backward.
-            judge.to("cpu")
-            with torch.cuda.device(cfg.judge.device):
-                torch.cuda.empty_cache()
             gathered = [None] * world
             dist.all_gather_object(
                 gathered,
@@ -609,7 +610,6 @@ def main(_):
                 tuples, weight_box[0][rank], roll, reward, policy, opt, cfg, tau_id
             )
             _trace(f"update_{completed + 1}:target_gradients:exit")
-            judge.to(cfg.judge.device)
             target_seconds = time.monotonic() - target_start
             optimizer_start = time.monotonic()
             counts = torch.tensor(
@@ -636,6 +636,7 @@ def main(_):
                 raise RuntimeError(f"Invalid gradient norm at update {completed + 1}: {grad_norm}")
             opt.step()
             ema_adapter_(policy, src="default", dst="old", decay=0.99)
+            inference.sync(policy)
             opt.zero_grad(set_to_none=True)
             tuples.clear()
             _trace("adapter_consistency:enter")
@@ -699,7 +700,7 @@ def main(_):
                 }
                 videos = []
                 if evaluation_due(completed, cfg.num_epochs, cfg.eval_freq, override_freq=FLAGS.monitor_eval_freq):
-                    metrics, videos = evaluator.evaluate(pipe, policy, roll, reward, judge, completed)
+                    metrics, videos = evaluator.evaluate(pipe, inference.model, roll, reward, judge, completed)
                     record.update(metrics)
                 _log(record, videos, logger=logger)
                 if completed % cfg.save_freq == 0:

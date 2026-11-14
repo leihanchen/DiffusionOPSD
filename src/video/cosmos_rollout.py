@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import torch
 from torch.utils.checkpoint import checkpoint
+from diffusionopsd.video.device_layout import module_device, tensor_tree_to
 
 
 def _detach_tree(value):
@@ -139,24 +140,28 @@ class CosmosRollout:
         endpoint = output.unsqueeze(0) if output.ndim == 4 else output
         return CosmosQuery(x0=endpoint.detach(), **captured)
 
-    def velocity(self, record, latents=None, timestep=None):
+    def velocity(self, record, latents=None, timestep=None, transformer=None):
         z = record.z_q if latents is None else latents
+        transformer = self.pipe.transformer if transformer is None else transformer
+        output_device = z.device
+        device = module_device(transformer)
+        z = z.to(device)
         predictions = []
         for saved in record.forward_inputs:
-            kwargs = dict(saved)
+            kwargs = tensor_tree_to(saved, device)
             tokens = z if saved["vision_tokens"][0].ndim == 5 else z[0]
-            kwargs["vision_tokens"] = [tokens.to(self.pipe.transformer.dtype)]
+            kwargs["vision_tokens"] = [tokens.to(transformer.dtype)]
             if timestep is not None:
-                kwargs["vision_timesteps"] = torch.full_like(saved["vision_timesteps"], float(timestep))
-            prediction = self.pipe.transformer(**kwargs)[0][0].float()
+                kwargs["vision_timesteps"] = torch.full_like(kwargs["vision_timesteps"], float(timestep))
+            prediction = transformer(**kwargs)[0][0].float()
             predictions.append(prediction if prediction.ndim == 5 else prediction.unsqueeze(0))
         if self.g == 1:
-            return predictions[0]
+            return predictions[0].to(output_device)
         cond, uncond = predictions
-        return uncond + self.g * (cond - uncond)
+        return (uncond + self.g * (cond - uncond)).to(output_device)
 
-    def prediction(self, record):
-        return record.z_q.float() - record.sigma_q * self.velocity(record)
+    def prediction(self, record, transformer=None):
+        return record.z_q.float() - record.sigma_q * self.velocity(record, transformer=transformer)
 
     def continue_from(self, record, forced_y):
         """Restore pre-query UniPC history; caller holds behavior weights fixed."""

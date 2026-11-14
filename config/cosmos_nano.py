@@ -12,7 +12,7 @@ def get_config():
         model="${VIDEO_REWARD_CKPT_PATH}/Cosmos3-Nano",
         model_id="nvidia/Cosmos3-Nano",
         model_revision="e59a53c25979a090fa8706c9acc0c254a6e89b92",
-        policy_device="cuda:0", vae_device="cuda:1", reward_device="cuda:1", judge_device="cuda:1",
+        policy_device="cuda:0", inference_device="cuda:1", vae_device="cuda:1", reward_device="cuda:1", judge_device="cuda:1",
         train_prompts="data/video_motion/train.txt", eval_prompts="data/video_motion/test.txt",
         num_frames=17, height=480, width=832, fps=24.0,
         num_steps=35, guidance_scale=6.0, flow_shift=10.0, query_sigma=0.278,

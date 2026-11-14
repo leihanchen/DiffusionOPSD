@@ -17,11 +17,13 @@ class Tiny(nn.Module):
 def test_trainer_branches_on_use_lora():
     text = Path("scripts/train_opsd_video_wan.py").read_text()
     assert "attach_lora" in text
-    assert 'set_adapter("old")' in text
+    assert 'inference.select("old")' in text
+    assert "InferenceReplica(policy" in text
+    assert "inference.sync(policy)" in text
     assert 'set_adapter("default")' in text
     assert "ema_adapter_" in text
     assert "if cfg.use_lora" in text
-    assert "copy.deepcopy(policy)" in text
+    assert "InferenceReplica(policy, device=dev, lora=False)" in text
     assert "expand_timesteps" in text
 
 
