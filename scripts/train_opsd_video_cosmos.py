@@ -31,13 +31,15 @@ import torch
 import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model_state_dict, set_peft_model_state_dict
 
+from diffusionopsd.curriculum.records import manifest_hash, read_manifest, validate_manifest
 from diffusionopsd.stat_tracking import PerPromptStatTracker
 from diffusionopsd.video.training_data import load_training_data
 from diffusionopsd.video.cosmos_quality import IsolatedVideoJudge
 from diffusionopsd.video.cosmos_rollout import CosmosRollout
 from diffusionopsd.video.device_layout import InferenceReplica
 from diffusionopsd.video.cosmos_training import (
-    PromptCursor, fit_queries, load_training_state, save_training_state, validate_cuda_devices,
+    PromptCursor, RoundCursor, fit_queries, load_training_state, save_training_state, validate_cuda_devices,
+    validate_round_transition,
 )
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
 from diffusionopsd.video.gates import effective_weight
@@ -122,12 +124,23 @@ def main():
     parser.add_argument("--run-dir", default="logs/cosmos-nano")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--preflight", action="store_true")
+    parser.add_argument("--curriculum-manifest", type=Path)
+    parser.add_argument("--curriculum-history", type=Path, help="JSON history array for lineage validation")
+    parser.add_argument("--curriculum-round", type=int)
+    parser.add_argument("--previous-round-checkpoint", type=Path)
     parser.add_argument("--max-updates-this-job", type=int, default=0)
     args = parser.parse_args()
     if args.max_updates_this_job < 0:
         parser.error("max-updates-this-job must be nonnegative")
+    curriculum = args.curriculum_manifest is not None
+    if curriculum != (args.curriculum_round is not None) or (curriculum and args.curriculum_round < 0):
+        parser.error("curriculum-manifest and nonnegative curriculum-round must be supplied together")
+    if args.previous_round_checkpoint and (not curriculum or args.resume):
+        parser.error("previous-round-checkpoint requires curriculum mode and cannot accompany --resume")
+    if curriculum and args.curriculum_round > 0 and not (args.resume or args.previous_round_checkpoint):
+        parser.error("Later rounds require an explicit previous checkpoint or same-round resume")
     cfg = read_config(args.config)
-    data = load_training_data(cfg, strip_files=False)
+    data = None if curriculum else load_training_data(cfg, strip_files=False)
     configure_reward(cfg)
     validate_config(cfg)
     model_path, versions = preflight(cfg)
@@ -147,25 +160,43 @@ def main():
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
-    train_prompts = [row["text"] for row in data.train]
-    eval_records = data.evaluation[:cfg.eval_count]
-    if len(eval_records) < cfg.eval_count:
-        raise ValueError("Evaluation count exceeds available dataset rows")
+    prompt_records = read_manifest(args.curriculum_manifest) if curriculum else []
+    history = read_manifest(args.curriculum_history) if args.curriculum_history else []
+    if curriculum:
+        validate_manifest(prompt_records, history)
+        if any(r.split != "train" or r.round_index != args.curriculum_round for r in prompt_records):
+            raise ValueError("Training manifest must contain only the selected training round")
+    train_prompts = ([r.text for r in prompt_records] if curriculum else
+                     [row["text"] for row in data.train])
+    eval_records = ([{"text": p} for p in Path(cfg.eval_prompts).read_text().splitlines() if p.strip()][:cfg.eval_count]
+                    if curriculum else data.evaluation[:cfg.eval_count])
     eval_prompts = [row["text"] for row in eval_records]
-    # One seeded permutation, cycled by the durable sampling-attempt cursor.
-    train_order = data.order(len(train_prompts), 1) if data.is_hf else list(range(len(train_prompts)))
+    train_order = (data.order(len(train_prompts), 1) if data is not None and data.is_hf
+                   else list(range(len(train_prompts))))
+    if not train_prompts or not eval_prompts:
+        raise ValueError("Training and held-out prompt files must not be empty")
     signature = cfg.to_dict()
-    signature["train_prompt_sha256"] = data.train_hash
-    signature["eval_prompt_sha256"] = data.eval_hash
-    if data.is_hf:
+    signature["train_prompt_sha256"] = (manifest_hash(prompt_records) if curriculum else
+                                        data.train_hash)
+    signature["eval_prompt_sha256"] = (hashlib.sha256(Path(cfg.eval_prompts).read_bytes()).hexdigest()
+                                       if curriculum else data.eval_hash)
+    if data is not None and data.is_hf:
         signature["dataset_identity"] = data.metadata
-    (run_dir / "manifest.json").write_text(json.dumps({"config": signature, "versions": versions}, indent=2))
+    if curriculum:
+        signature.pop("train_prompts", None)
+        signature.update(curriculum_manifest_hash=manifest_hash(prompt_records),
+                         curriculum_round=args.curriculum_round, curriculum_history_hash=manifest_hash(history))
     resume_update, logging_group = 0, None
-    if args.resume:
-        metadata = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if args.resume or args.previous_round_checkpoint:
+        metadata = torch.load(checkpoint_path if args.resume else args.previous_round_checkpoint, map_location="cpu", weights_only=False)
+        if args.previous_round_checkpoint:
+            validate_round_transition(metadata, signature)
+        elif metadata["config"] != signature:
+            raise ValueError("Checkpoint configuration differs from this run")
         resume_update = metadata["update"]
         logging_group = metadata["extra"].get("logging_experiment_group")
         del metadata
+    (run_dir / "manifest.json").write_text(json.dumps({"config": signature, "versions": versions}, indent=2))
     with VideoTrainingLogger(
         run_dir, {**signature, "training_versions": versions}, "cosmos-nano",
         start_update=resume_update, resume_checkpoint=checkpoint_path if args.resume else None,
@@ -202,28 +233,52 @@ def main():
         tracker = PerPromptStatTracker(False)
         references, thresholds, completed = {}, {}, 0
         cursor_state = None
-        if args.resume:
-            state = load_training_state(checkpoint_path, config=signature)
+        round_stats = {"attempted_clips": 0, "successful_updates": 0, "prompt_visits": 0}
+        source_checkpoint = checkpoint_path if args.resume else args.previous_round_checkpoint
+        if source_checkpoint:
+            if args.previous_round_checkpoint:
+                metadata = torch.load(source_checkpoint, map_location="cpu", weights_only=False)
+                validate_round_transition(metadata, signature)
+                source_config = metadata["config"]
+                del metadata
+            else:
+                source_config = signature
+            state = load_training_state(source_checkpoint, config=source_config)
             for name, values in state["adapters"].items():
                 set_peft_model_state_dict(policy, values, adapter_name=name)
             optimizer.load_state_dict(state["optimizer"])
             completed = state["update"]
             references, thresholds = state["extra"]["references"], state["extra"]["thresholds"]
             tracker.__dict__.update(state["extra"]["tracker"])
-            cursor_state = state["extra"].get("prompt_cursor")
-        # The 28-GiB replica executes on GPU1, but stays in host memory while
-        # reward models run. Keeping it resident leaves no scoring/gradient room.
+            if not args.previous_round_checkpoint:
+                cursor_state = state["extra"].get("round_cursor" if curriculum else "prompt_cursor")
+                round_stats = state["extra"].get("round_stats", round_stats)
+                if curriculum and cursor_state is None:
+                    raise ValueError("Curriculum checkpoint is missing its committed round cursor")
         inference = InferenceReplica(policy, device="cpu")
         inference.select("default")
         pipe.transformer = inference.model
-        prompt_cursor = (
+        order = list(range(len(train_prompts)))
+        random.Random(cfg.seed + (args.curriculum_round or 0)).shuffle(order)
+        prompt_cursor = (RoundCursor(**cursor_state) if cursor_state is not None else RoundCursor(order)) if curriculum else (
             PromptCursor(**cursor_state) if cursor_state is not None
             else PromptCursor(num_prompts=len(train_prompts), cursor=completed)
         )
-        if prompt_cursor.num_prompts != len(train_prompts):
+        if (len(prompt_cursor.order) if curriculum else prompt_cursor.num_prompts) != len(train_prompts):
             raise ValueError("Checkpoint prompt cursor does not match the training prompt set")
         logger.log_event(completed, "resume_position", {"prompt_cursor": prompt_cursor.cursor})
         emit("training_position", completed_updates=completed, prompt_cursor=prompt_cursor.cursor)
+
+        def checkpoint():
+            save_training_state(
+                checkpoint_path, adapters=cpu_adapters(policy), optimizer=optimizer.state_dict(), update=completed,
+                config=signature, extra={"references": references, "thresholds": thresholds,
+                    "tracker": tracker.__dict__,
+                    "round_cursor" if curriculum else "prompt_cursor": prompt_cursor.state_dict(),
+                    "round_stats": round_stats, "logging_experiment_group": logger.experiment_group},
+            )
+            logger.log_event(completed, "checkpoint", {"path": str(checkpoint_path)})
+            emit("checkpoint", update=completed, path=str(checkpoint_path))
 
         trace_stages = os.environ.get("COSMOS_TRACE_STAGES", "0") == "1"
 
@@ -340,14 +395,24 @@ def main():
                 logger.log_eval(update, {**evaluation_metrics(rows, base_rows),
                                          "eval/duration_seconds": time.monotonic() - started}, videos)
 
+            if curriculum and not source_checkpoint:
+                checkpoint()  # Commit calibration and RNG before the first prompt attempt.
             if completed == 0:
                 evaluate(0)
             stop_at = min(cfg.updates, completed + args.max_updates_this_job) if args.max_updates_this_job else cfg.updates
+            if curriculum:
+                stop_at = completed + (args.max_updates_this_job or len(train_prompts))
             while completed < stop_at:
-                prompt_index, sampling_attempt = prompt_cursor.take()
-                prompt_index = train_order[prompt_index]
+                if curriculum:
+                    sampling_attempt = args.curriculum_round * len(train_prompts) + prompt_cursor.cursor
+                    prompt_index = prompt_cursor.take()
+                    if prompt_index is None:
+                        break
+                else:
+                    prompt_index, sampling_attempt = prompt_cursor.take()
+                    prompt_index = train_order[prompt_index]
                 prompt = train_prompts[prompt_index]
-                record_key = data.key(prompt_index)
+                record_key = prompt_records[prompt_index].prompt_id if curriculum else data.key(prompt_index)
                 base = reference(prompt)
                 inference.select("old")
                 records, rewards, motions, quality_probs = [], [], [], []
@@ -370,8 +435,13 @@ def main():
                                      "sampling_attempt": sampling_attempt, "prompt": prompt})
                     emit("sampling_skipped", reason="identity_gate", completed_updates=completed,
                          prompt=prompt, sampling_attempt=sampling_attempt,
-                         consecutive_empty=prompt_cursor.consecutive_empty + 1)
+                         consecutive_empty=0 if curriculum else prompt_cursor.consecutive_empty + 1)
+                if curriculum:
+                    round_stats["prompt_visits"] += 1
+                    round_stats["attempted_clips"] += cfg.clips_per_prompt
                 if not prompt_cursor.record_batch(len(records)):
+                    if curriculum:
+                        checkpoint()
                     continue
                 advantages = tracker.update([record_key]*len(records), np.array(rewards))
                 weights = effective_weight(
@@ -382,7 +452,7 @@ def main():
                 policy.eval()  # LoRA still trains; keep inference/dropout behavior consistent.
                 before = {k: v.detach().clone() for k, v in get_peft_model_state_dict(policy).items()}
                 context = torch.autograd.graph.save_on_cpu() if cfg.offload_saved_tensors else nullcontext()
-                logger.log_event(completed, "sampling", {**data.train[prompt_index], "record_key": record_key, "generated": cfg.clips_per_prompt,
+                logger.log_event(completed, "sampling", {**({"prompt_id": record_key} if curriculum else data.train[prompt_index]), "record_key": record_key, "generated": cfg.clips_per_prompt,
                                  "retained": len(records), "sampling_attempt": sampling_attempt})
                 emit("fitting", update=completed+1, retained=len(records))
                 with context, torch.autocast("cuda", dtype=torch.bfloat16):
@@ -393,6 +463,8 @@ def main():
                 ema_adapter_(policy, decay=cfg.ema_decay)
                 inference.sync(policy)
                 completed += 1
+                if curriculum:
+                    round_stats["successful_updates"] += 1
                 logger.log_train(completed, {**metrics, "endpoint_reward": float(np.mean(rewards)),
                                  "mean_weight": float(np.mean(weights)), "policy_changed": changed,
                                  "learning_rate": optimizer.param_groups[0]["lr"],
@@ -405,18 +477,15 @@ def main():
                 with open(run_dir / "metrics.jsonl", "a") as stream:
                     stream.write(json.dumps({"update": completed, "endpoint_reward": float(np.mean(rewards)), **metrics})+"\n")
                 del records
-                if evaluation_due(completed, stop_at, cfg.eval_every):
+                if not curriculum and evaluation_due(completed, stop_at, cfg.eval_every):
                     evaluate(completed)
-                if evaluation_due(completed, stop_at, cfg.checkpoint_every):
-                    save_training_state(
-                        checkpoint_path, adapters=cpu_adapters(policy), optimizer=optimizer.state_dict(), update=completed,
-                        config=signature, extra={"references": references, "thresholds": thresholds,
-                                                 "tracker": tracker.__dict__, "prompt_cursor": prompt_cursor.state_dict(),
-                                                     "logging_experiment_group": logger.experiment_group},
-                    )
-                    logger.log_event(completed, "checkpoint", {"path": str(checkpoint_path)})
-                    emit("checkpoint", update=completed, path=str(checkpoint_path))
-            status = "complete" if completed >= cfg.updates else "continue"
+                if curriculum or evaluation_due(completed, stop_at, cfg.checkpoint_every):
+                    checkpoint()
+            finished_round = curriculum and prompt_cursor.cursor == len(train_prompts)
+            if finished_round:
+                evaluate(completed)
+                checkpoint()
+            status = "complete" if (finished_round if curriculum else completed >= cfg.updates) else "continue"
             (run_dir / f"job_{os.environ.get('SLURM_JOB_ID', 'local')}.json").write_text(
                 json.dumps({"status": status, "completed_updates": completed, "checkpoint": str(checkpoint_path)})
             )

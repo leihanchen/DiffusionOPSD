@@ -180,11 +180,11 @@ Run commands below from this worktree after exporting those paths. The wrapper l
 
 **Interfaces:** `RoundCursor(order: list[int], next_index: int = 0)` with `take() -> int | None`; CLI `--curriculum-manifest PATH`, `--curriculum-round INT`, and `--previous-round-checkpoint PATH`. Resume within a round uses the existing `--resume` flag. The previous-round path is an explicit transition, distinct from same-round resume.
 
-- [ ] Write `test_complete_one_pass`, `test_rejected_batch_advances_without_update`, and `test_resume_matches_uninterrupted`. Assert 32 prompt visits, 128 attempted clips, and at most 32 updates with four clips/visit; no optimizer or EMA change for empty batches.
-- [ ] Run the new test file; expect missing-cursor failure before implementation.
-- [ ] Implement deterministic shuffle by round seed and atomic checkpoint extras: round ID, manifest hash, cursor, successful updates, costs, and reference/calibration state. Checkpoint after each processed prompt, including rejected visits; recover from the last committed checkpoint after interruption.
-- [ ] Validate round transitions by comparing invariant training settings separately from the replaceable manifest identity. Preserve student, EMA, optimizer, RNG, fixed calibration, and fixed-base reference cache. Reset only the round cursor and per-round statistics. Reject changed configuration during same-round resume.
-- [ ] Test a legacy text-file run, a manifest hash mismatch, and a transition to a different 32-prompt set. Run `bash scripts/run_cosmos_python.sh -m pytest tests/curriculum/test_round_training.py tests/video/test_cosmos_training.py -q`; expect PASS. Commit `feat(video): add one-pass curriculum training rounds`.
+- [x] Write `test_complete_one_pass`, `test_rejected_batch_advances_without_update`, and `test_resume_matches_uninterrupted`. Assert 32 prompt visits, 128 attempted clips, and at most 32 updates with four clips/visit; no optimizer or EMA change for empty batches.
+- [x] Run the new test file; expect missing-cursor failure before implementation.
+- [x] Implement deterministic shuffle by round seed and atomic checkpoint extras: round ID, manifest hash, cursor, successful updates, costs, and reference/calibration state. Checkpoint after each processed prompt, including rejected visits; recover from the last committed checkpoint after interruption.
+- [x] Validate round transitions by comparing invariant training settings separately from the replaceable manifest identity. Preserve student, EMA, optimizer, RNG, fixed calibration, and fixed-base reference cache. Reset only the round cursor and per-round statistics. Reject changed configuration during same-round resume.
+- [x] Test a legacy text-file run, a manifest hash mismatch, and a transition to a different 32-prompt set. Run `bash scripts/run_cosmos_python.sh -m pytest tests/curriculum/test_round_training.py tests/video/test_cosmos_training.py -q`; expect PASS. Commit `feat(video): add one-pass curriculum training rounds`.
 
 **Deliverable:** A complete prompt pass using the existing reward and fitting mechanism.
 
