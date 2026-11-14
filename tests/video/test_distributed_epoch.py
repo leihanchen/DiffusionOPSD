@@ -90,11 +90,12 @@ def test_active_cuda_devices_deduplicates_shared_vae_and_rejects_missing_gpu():
     cfg = SimpleNamespace(vae_device="cuda:1", reward_device="cuda:1", judge=SimpleNamespace(device="cuda:1"))
     assert active_cuda_devices(cfg, available_count=2) == (0, 1)
     cfg.vae_device = "cuda:2"
-    assert active_cuda_devices(cfg, available_count=3) == (0, 1, 2)
-    with pytest.raises(ValueError, match="visible"):
+    with pytest.raises(ValueError, match="exactly two"):
+        active_cuda_devices(cfg, available_count=3)
+    with pytest.raises(ValueError, match="cuda:1"):
         active_cuda_devices(cfg, available_count=2)
     cfg.vae_device = "cpu"
-    with pytest.raises(ValueError, match="explicit CUDA"):
+    with pytest.raises(ValueError, match="cuda:1"):
         active_cuda_devices(cfg, available_count=2)
 
 

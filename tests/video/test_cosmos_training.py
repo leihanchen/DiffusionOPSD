@@ -47,10 +47,11 @@ def test_shared_gpu_layout_validates_actual_configured_devices():
     from diffusionopsd.video.cosmos_training import validate_cuda_devices
 
     validate_cuda_devices(["cuda:0", "cuda:1", "cuda:1", "cuda:1"], visible_count=2)
-    validate_cuda_devices(["cuda", "cuda:1", "cuda:2"], visible_count=3)
-    with pytest.raises(ValueError, match="3 visible"):
+    with pytest.raises(ValueError, match="exactly two"):
+        validate_cuda_devices(["cuda", "cuda:1", "cuda:2"], visible_count=3)
+    with pytest.raises(ValueError, match="cuda:1"):
         validate_cuda_devices(["cuda:0", "cuda:2"], visible_count=2)
-    with pytest.raises(ValueError, match="CUDA"):
+    with pytest.raises(ValueError, match="cuda:0"):
         validate_cuda_devices(["cpu", "cuda:0"], visible_count=2)
 
 

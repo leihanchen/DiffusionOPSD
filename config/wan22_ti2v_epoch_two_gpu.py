@@ -1,4 +1,4 @@
-"""Two-GPU placement probe; preserve the three-GPU epoch training settings."""
+"""Compatibility alias for the standard two-GPU-per-worker epoch preset."""
 
 from config.wan22_ti2v_epoch import get_config as epoch_config
 

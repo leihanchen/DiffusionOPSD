@@ -24,6 +24,8 @@ def main():
     parser.add_argument('--backbone', choices=['wan', 'cosmos'], required=True)
     parser.add_argument('--output', required=True)
     args = parser.parse_args()
+    from diffusionopsd.video.device_layout import InferenceReplica, encode_wan_prompt, validate_two_gpu_layout
+    validate_two_gpu_layout('cuda:0', ['cuda:1'], visible_count=torch.cuda.device_count())
     torch.manual_seed(42)
     started = time.perf_counter()
     weights = Path(os.environ['VIDEO_REWARD_CKPT_PATH'])
@@ -37,23 +39,25 @@ def main():
         cfg = get_config()
         model = weights / 'Wan2.2-TI2V-5B-Diffusers'
         pipe = WanPipeline.from_pretrained(model, torch_dtype=torch.bfloat16, local_files_only=True)
-        pipe.text_encoder.to('cuda:0').requires_grad_(False)
-        pipe.vae.to('cuda:2').requires_grad_(False)
+        pipe.text_encoder.to('cuda:1').requires_grad_(False)
+        pipe.vae.to('cuda:1').requires_grad_(False)
         pipe.transformer.to('cuda:0').requires_grad_(False)
         require_expand_timesteps(pipe, str(model))
         pipe.transformer = attach_lora(pipe.transformer, cfg.train.lora_path)
         policy = pipe.transformer
         policy.enable_gradient_checkpointing()
         roll = WanRollout(pipe, cfg.sample.num_steps, cfg.sample.guidance_scale, offload_vae_activations=True)
-        pe, ne = pipe.encode_prompt(prompt, negative_prompt='', do_classifier_free_guidance=True, device='cuda:0')[:2]
+        pe, ne = encode_wan_prompt(pipe, prompt, negative_prompt='', do_classifier_free_guidance=True, device='cuda:1')[:2]
         shape = latent_shape_from_pipe(pipe, 17, 256, 384)
-        policy.set_adapter('old')
+        inference = InferenceReplica(policy, device='cuda:1')
+        inference.select('old')
+        pipe.transformer = inference.model
         with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
-            rec = roll.rollout(pe, ne, torch.randn(shape, device='cuda:0'), cfg.opa.query_sigma)
+            rec = roll.rollout(pe, ne, torch.randn(shape, device='cuda:1'), cfg.opa.query_sigma)
         y0 = clean_output(rec.z_q, rec.v_old_q, torch.tensor([rec.sigma_q], device='cuda:0')).float()
 
         def prediction(_):
-            velocity = roll.velocity(rec.z_q, torch.tensor(rec.sigma_q, device='cuda:0'), pe, ne)
+            velocity = roll.velocity(rec.z_q, torch.tensor(rec.sigma_q, device='cuda:0'), pe, ne, transformer=policy)
             return clean_output(rec.z_q, velocity, torch.tensor([rec.sigma_q], device='cuda:0')).float()
 
         fitting_roll = SimpleNamespace(prediction=prediction)
@@ -71,7 +75,7 @@ def main():
             pipe.scheduler.config, flow_shift=cfg.flow_shift, use_karras_sigmas=False,
         )
         pipe.transformer.to('cuda:0').eval().requires_grad_(False)
-        pipe.vae.to('cuda:2').eval().requires_grad_(False)
+        pipe.vae.to('cuda:1').eval().requires_grad_(False)
         policy = pipe.transformer
         lora = LoraConfig(r=cfg.lora_rank, lora_alpha=cfg.lora_rank * 2, target_modules=list(cfg.lora_targets))
         policy.add_adapter(lora, adapter_name='default')
@@ -79,12 +83,14 @@ def main():
         set_peft_model_state_dict(policy, get_peft_model_state_dict(policy), adapter_name='old')
         policy.enable_gradient_checkpointing()
         roll = CosmosRollout(pipe, cfg.num_steps, cfg.guidance_scale, offload_vae_activations=True)
-        policy.set_adapter('old')
+        inference = InferenceReplica(policy, device='cuda:1')
+        inference.select('old')
+        pipe.transformer = inference.model
         with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
             query = roll.rollout(json.dumps({'description': prompt}),
-                                 generator=torch.Generator('cuda:0').manual_seed(42),
+                                 generator=torch.Generator('cuda:1').manual_seed(42),
                                  sigma_star=cfg.query_sigma, num_frames=17, height=256, width=384, fps=cfg.fps)
-        fitting_roll = roll
+        fitting_roll = SimpleNamespace(prediction=lambda rec: roll.prediction(rec, transformer=policy))
     policy.set_adapter('default')
     policy.eval()
     trainable = [p for p in policy.parameters() if p.requires_grad]

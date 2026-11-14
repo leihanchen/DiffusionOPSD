@@ -35,6 +35,7 @@ from diffusionopsd.stat_tracking import PerPromptStatTracker
 from diffusionopsd.video.training_data import load_training_data
 from diffusionopsd.video.cosmos_quality import IsolatedVideoJudge
 from diffusionopsd.video.cosmos_rollout import CosmosRollout
+from diffusionopsd.video.device_layout import InferenceReplica
 from diffusionopsd.video.cosmos_training import (
     PromptCursor, fit_queries, load_training_state, save_training_state, validate_cuda_devices,
 )
@@ -133,7 +134,7 @@ def main():
     if args.preflight:
         return
     validate_cuda_devices(
-        [cfg.policy_device, cfg.vae_device, cfg.reward_device, cfg.judge_device],
+        [cfg.policy_device, cfg.inference_device, cfg.vae_device, cfg.reward_device, cfg.judge_device],
         visible_count=torch.cuda.device_count(),
     )
     from diffusers import Cosmos3OmniPipeline, UniPCMultistepScheduler
@@ -210,6 +211,11 @@ def main():
             references, thresholds = state["extra"]["references"], state["extra"]["thresholds"]
             tracker.__dict__.update(state["extra"]["tracker"])
             cursor_state = state["extra"].get("prompt_cursor")
+        # The 28-GiB replica executes on GPU1, but stays in host memory while
+        # reward models run. Keeping it resident leaves no scoring/gradient room.
+        inference = InferenceReplica(policy, device="cpu")
+        inference.select("default")
+        pipe.transformer = inference.model
         prompt_cursor = (
             PromptCursor(**cursor_state) if cursor_state is not None
             else PromptCursor(num_prompts=len(train_prompts), cursor=completed)
@@ -265,11 +271,12 @@ def main():
             )
 
         def generate(prompt, seed):
-            return traced(
-                "native_generation", roll.rollout, structured_prompt(prompt),
-                generator=torch.Generator(cfg.policy_device).manual_seed(seed),
-                sigma_star=cfg.query_sigma, num_frames=cfg.num_frames, height=cfg.height, width=cfg.width, fps=cfg.fps,
-            )
+            with inference.active_on(cfg.inference_device):
+                return traced(
+                    "native_generation", roll.rollout, structured_prompt(prompt),
+                    generator=torch.Generator(cfg.inference_device).manual_seed(seed),
+                    sigma_star=cfg.query_sigma, num_frames=cfg.num_frames, height=cfg.height, width=cfg.width, fps=cfg.fps,
+                )
 
         judge = IsolatedVideoJudge(ROOT, run_dir, cfg.judge_device)
         try:
@@ -280,7 +287,7 @@ def main():
                 seed = cfg.seed if seed is None else seed
                 key = hashlib.sha256(f"{seed}:{prompt}".encode()).hexdigest()
                 if key not in references:
-                    policy.disable_adapters()
+                    inference.model.disable_adapters()
                     try:
                         with torch.no_grad():
                             rec = generate(prompt, seed)
@@ -291,10 +298,11 @@ def main():
                                 "identity": float(scored.s_id), "motion": float(scored.motion),
                             }
                     finally:
-                        policy.enable_adapters()
+                        inference.model.enable_adapters()
+                        inference.model.requires_grad_(False)
                 return references[key]
 
-            policy.set_adapter("old")
+            inference.select("old")
             if not thresholds:
                 emit("calibration")
                 baseline = [reference(train_prompts[i]) for i in train_order[:cfg.calibration_prompts]]
@@ -306,7 +314,7 @@ def main():
                 emit("calibrated", **thresholds)
 
             def evaluate(update):
-                policy.set_adapter("default")
+                inference.select("default")
                 rows, base_rows, videos = [], [], []
                 started = time.monotonic()
                 with torch.no_grad():
@@ -341,7 +349,7 @@ def main():
                 prompt = train_prompts[prompt_index]
                 record_key = data.key(prompt_index)
                 base = reference(prompt)
-                policy.set_adapter("old")
+                inference.select("old")
                 records, rewards, motions, quality_probs = [], [], [], []
                 emit("sampling", update=completed+1, prompt=prompt, sampling_attempt=sampling_attempt)
                 with torch.no_grad():
@@ -378,11 +386,12 @@ def main():
                                  "retained": len(records), "sampling_attempt": sampling_attempt})
                 emit("fitting", update=completed+1, retained=len(records))
                 with context, torch.autocast("cuda", dtype=torch.bfloat16):
-                    metrics = fit_queries(roll, records, weights, local_reward, optimizer, cfg, progress=fitting_progress)
+                    metrics = fit_queries(roll, records, weights, local_reward, optimizer, cfg, progress=fitting_progress, policy=policy)
                 changed = any(not torch.equal(before[k], v) for k, v in get_peft_model_state_dict(policy).items())
                 if not changed:
                     raise RuntimeError("Optimizer did not change any policy adapter weights")
                 ema_adapter_(policy, decay=cfg.ema_decay)
+                inference.sync(policy)
                 completed += 1
                 logger.log_train(completed, {**metrics, "endpoint_reward": float(np.mean(rewards)),
                                  "mean_weight": float(np.mean(weights)), "policy_changed": changed,

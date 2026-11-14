@@ -639,6 +639,21 @@ Released under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for third
 
 ## Video training logs
 
+All video training workers use exactly **two visible GPUs**. Local `cuda:0` holds the trainable policy and optimizer;
+local `cuda:1` holds the frozen inference replica, text encoder (Wan), VAE, geometry scorers and quality judge. The frozen
+base layers of a LoRA policy remain part of its training replica on GPU 0. Frozen inference weights are synchronized
+after optimizer/EMA updates; query replay transfers inputs to GPU 0 while preserving gradients through device copies.
+Evaluation and behavior sampling run on GPU 1. All video presets use this layout and reject one/three/more visible GPUs.
+Cosmos stages its idle inference replica in CPU memory between generation calls so GPU 1 has room for reward
+activations and target gradients. Generation moves it to GPU 1 and releases its GPU allocation afterwards;
+this adds host memory use and transfer overhead without changing sampling or fitting.
+
+Allocate **2 × n GPUs per node for n workers**, with two GPUs bound per task. The Wan scaled submitter derives workers
+from the requested even GPU count (two or four on Narval). Single-worker launchers request two GPUs per node; the epoch
+launcher requests two per node for one worker and binds its Slurm step accordingly. `wan22_ti2v_epoch_two_gpu` is retained
+as a compatibility alias, not an alternative placement. Existing checkpoints remain readable, but strict configuration
+checks reject resuming incompatible old device configurations; use the matching new preset for a new run.
+
 All video OPSD trainers (Wan single-worker/distributed and Cosmos) automatically create offline W&B runs in the
 training directory's `wandb/` folder. Logging requires no API key or network access. Default destination is
 `cvis_tmu/diffusionopsd`; override it with `WANDB_ENTITY` and `WANDB_PROJECT`. There is no automatic upload.

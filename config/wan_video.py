@@ -38,6 +38,11 @@ def get_config():
     config.judge = ml_collections.ConfigDict()
     config.judge.device = "cuda:1"
     config.judge.num_frames = 8
+    config.policy_device = "cuda:0"
+    config.inference_device = "cuda:1"
+    config.text_encoder_device = "cuda:1"
+    config.vae_device = "cuda:1"
+    config.offload_vae_activations = True
     config.reward_device = "cuda:1"
     config.prompt_fn = "text_file"
     config.prompt_fn_kwargs = {"path": "data/video_motion/train.txt"}

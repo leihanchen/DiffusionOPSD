@@ -18,16 +18,16 @@ def configure_isolated_worker_nccl() -> dict[str, str]:
 
 
 def active_cuda_devices(cfg, available_count: int) -> tuple[int, ...]:
-    """Validate configured model placement and return each used GPU once."""
-    devices = {0}  # Policy and NCCL always use local GPU 0.
-    for placement in (cfg.vae_device, cfg.reward_device, cfg.judge.device):
-        device = torch.device(placement)
-        if device.type != "cuda" or device.index is None:
-            raise ValueError(f"Expected explicit CUDA device, got {placement}")
-        devices.add(device.index)
-    if max(devices) >= available_count:
-        raise ValueError(f"Configured GPUs {sorted(devices)} exceed {available_count} visible CUDA devices")
-    return tuple(sorted(devices))
+    """Validate the standard two-GPU worker contract."""
+    from diffusionopsd.video.device_layout import validate_two_gpu_layout
+
+    validate_two_gpu_layout(
+        getattr(cfg, "policy_device", "cuda:0"),
+        [cfg.vae_device, cfg.reward_device, cfg.judge.device,
+         getattr(cfg, "text_encoder_device", "cuda:1"), getattr(cfg, "inference_device", "cuda:1")],
+        visible_count=available_count,
+    )
+    return (0, 1)
 
 
 def prompt_schedule(prompts: list[str], nonce: int, workers: int) -> list[int]:

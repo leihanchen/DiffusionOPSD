@@ -7,7 +7,6 @@ Single-node: policy on cuda:0, rewards on cuda:1.
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import os
@@ -33,6 +32,8 @@ from diffusionopsd.ema import EMAModuleWrapper
 from diffusionopsd.stat_tracking import PerPromptStatTracker
 from diffusionopsd.video.training_data import load_training_data
 from diffusionopsd.video.branch_loss import branch_loss
+from diffusionopsd.video.device_layout import InferenceReplica, encode_wan_prompt
+from diffusionopsd.video.distributed_epoch import active_cuda_devices
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
 from diffusionopsd.video.gates import effective_weight, identity_keep, percentile_threshold
 from diffusionopsd.video.geo_reward import GeoReward, configure_reward
@@ -80,14 +81,17 @@ def main(_):
 
 
 def _train(cfg, evaluator, logger, data):
-    dev = "cuda:0"
+    active_cuda_devices(cfg, torch.cuda.device_count())
+    dev = cfg.inference_device
     model_path = os.path.expandvars(cfg.pretrained.model)
-    pipe = WanPipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16, local_files_only=True).to(dev)
+    pipe = WanPipeline.from_pretrained(model_path, torch_dtype=torch.bfloat16, local_files_only=True)
+    pipe.transformer.to(cfg.policy_device)
+    pipe.text_encoder.to(cfg.text_encoder_device)
     pipe.vae.requires_grad_(False)
-    pipe.vae.to(getattr(cfg, "vae_device", dev))
+    pipe.vae.to(cfg.vae_device)
     pipe.text_encoder.requires_grad_(False)
     print(
-        json.dumps({"policy_device": dev, "vae_device": str(pipe.vae.device), "reward_device": cfg.reward_device}),
+        json.dumps({"policy_device": cfg.policy_device, "inference_device": dev, "vae_device": str(pipe.vae.device), "reward_device": cfg.reward_device}),
         flush=True,
     )
     from diffusionopsd.video.wan_geometry import require_expand_timesteps
@@ -102,11 +106,17 @@ def _train(cfg, evaluator, logger, data):
     else:
         policy = pipe.transformer.to(torch.float32)
         policy.enable_gradient_checkpointing()
-        behavior = copy.deepcopy(policy).requires_grad_(False)
+        behavior = InferenceReplica(policy, device=dev, lora=False).model
+    inference = InferenceReplica(policy, device=dev) if cfg.use_lora else None
+    if inference is not None:
+        inference.select("default")
+        pipe.transformer = inference.model
+    else:
+        pipe.transformer = behavior
     trainable = [param for param in policy.parameters() if param.requires_grad]
     opt = torch.optim.AdamW(trainable, lr=cfg.train.learning_rate, weight_decay=cfg.train.adam_weight_decay)
     ema = (
-        None if cfg.use_lora else EMAModuleWrapper(policy.parameters(), decay=0.99, update_step_interval=1, device=dev)
+        None if cfg.use_lora else EMAModuleWrapper(policy.parameters(), decay=0.99, update_step_interval=1, device=cfg.policy_device)
     )
     roll_old = WanRollout(
         pipe,
@@ -134,7 +144,7 @@ def _train(cfg, evaluator, logger, data):
     with torch.no_grad():
         for index in random.Random(0).sample(range(len(prompts)), min(cfg.gates.calib_prompts, len(prompts))):
             prompt, key = prompts[index], data.key(index)
-            pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev)[:2]
+            pe, ne = encode_wan_prompt(pipe, prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev)[:2]
             g = torch.Generator(dev).manual_seed(_prompt_seed(key))
             latents = torch.randn(_latent_shape(pipe, cfg), device=dev, dtype=torch.float32, generator=g)
             with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -153,19 +163,20 @@ def _train(cfg, evaluator, logger, data):
     if evaluation_due(0, cfg.num_epochs, cfg.eval_freq):
         # Calibration references are cached on CPU; release its final GPU tensors.
         rec = pe = ne = latents = clip = out = None
-        metrics, videos = evaluator.evaluate(pipe, policy, roll_old, reward, judge, 0)
+        metrics, videos = evaluator.evaluate(pipe, inference.model if inference is not None else behavior, roll_old, reward, judge, 0)
         _log_record({"optimizer_updates": 0, **metrics}, videos, logger=logger)
 
     for epoch in range(cfg.num_epochs):
         batch_indices = sample_rng.sample(range(len(prompts)), cfg.sample.num_batches_per_epoch)
         tuples = []
         if cfg.use_lora:
-            policy.set_adapter("old")
+            inference.select("old")
+            pipe.transformer = inference.model
         else:
             pipe.transformer = behavior
         for index in batch_indices:
             prompt, key = prompts[index], data.key(index)
-            pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev)[:2]
+            pe, ne = encode_wan_prompt(pipe, prompt, negative_prompt="", do_classifier_free_guidance=True, device=dev)[:2]
             if key not in refs:
                 with torch.no_grad():
                     g = torch.Generator(dev).manual_seed(_prompt_seed(key))
@@ -230,7 +241,7 @@ def _train(cfg, evaluator, logger, data):
         if cfg.use_lora:
             policy.set_adapter("default")
         else:
-            pipe.transformer = policy
+            pipe.transformer = behavior
         policy.train()
         opt.zero_grad()
         distillation_loss_sum = torch.zeros((), device=dev)
@@ -269,7 +280,9 @@ def _train(cfg, evaluator, logger, data):
             ema.step(policy.parameters(), epoch)
             with torch.no_grad():
                 for pb, pp in zip(behavior.parameters(), policy.parameters()):
-                    pb.mul_(0.99).add_(pp.detach(), alpha=0.01)
+                    pb.mul_(0.99).add_(pp.detach().to(pb.device), alpha=0.01)
+        if inference is not None:
+            inference.sync(policy)
         # Average over the rollouts actually used in backward, not all sampled rollouts.
         mean_distillation_loss = float(distillation_loss_sum / len(kept)) if kept else None
         record = {
@@ -310,7 +323,13 @@ def _train(cfg, evaluator, logger, data):
             kept.clear()
             t = rec = rec_ref = pe = ne = latents = clip = out = s_id = None
             y0 = yg = g0 = y_theta = v_theta = loss = None
-            metrics, videos = evaluator.evaluate(pipe, policy, roll_old, reward, judge, epoch + 1)
+            if inference is None:
+                saved_behavior = {k: v.detach().cpu().clone() for k, v in behavior.state_dict().items()}
+                behavior.load_state_dict(policy.state_dict())
+            metrics, videos = evaluator.evaluate(pipe, inference.model if inference is not None else behavior, roll_old, reward, judge, epoch + 1)
+            if inference is None:
+                behavior.load_state_dict(saved_behavior)
+                del saved_behavior
             record.update(metrics)
         _log_record(record, videos, logger=logger)
 

@@ -56,7 +56,9 @@ def evaluation_state(pipe, policy, reward, use_lora):
 
 def generate_clip(pipe, roll, cfg, prompt, seed, device):
     """Return a decoded clip [1,T,3,H,W] using a local noise generator."""
-    pe, ne = pipe.encode_prompt(prompt, negative_prompt="", do_classifier_free_guidance=True, device=device)[:2]
+    from diffusionopsd.video.device_layout import encode_wan_prompt
+
+    pe, ne = encode_wan_prompt(pipe, prompt, negative_prompt="", do_classifier_free_guidance=True, device=device)[:2]
     shape = latent_shape_from_pipe(pipe, cfg.video.num_frames, cfg.video.height, cfg.video.width)
     generator = torch.Generator(device).manual_seed(seed)
     latents = torch.randn(shape, device=device, dtype=torch.float32, generator=generator)

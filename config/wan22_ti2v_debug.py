@@ -6,7 +6,7 @@ from config.wan22_ti2v import get_config as wan22_config
 def get_config():
     config = wan22_config()
     config.debug = True
-    config.vae_device = "cuda:2"
+    config.vae_device = "cuda:1"
     config.offload_vae_activations = True
     config.gates.calib_prompts = 2
     config.num_epochs = 4

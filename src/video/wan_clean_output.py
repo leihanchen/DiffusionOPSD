@@ -8,6 +8,7 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from diffusionopsd.video.wan_geometry import flow_timestep
+from diffusionopsd.video.device_layout import module_device
 
 
 def clean_output(z: torch.Tensor, v: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
@@ -40,13 +41,17 @@ class WanRollout:
 
     def velocity(self, z, sigma, prompt_embeds, negative_embeds, transformer=None):
         tr = transformer if transformer is not None else self.pipe.transformer
+        output_device = z.device
+        device = module_device(tr, fallback=z.device)
+        z, sigma = z.to(device), sigma.to(device)
+        prompt_embeds, negative_embeds = prompt_embeds.to(device), negative_embeds.to(device)
         expand = bool(getattr(self.pipe.config, "expand_timesteps", False))
         t = flow_timestep(sigma, z, expand)
         v_c = tr(hidden_states=z, timestep=t, encoder_hidden_states=prompt_embeds, return_dict=False)[0]
         if self.g == 1.0:
-            return v_c
+            return v_c.to(output_device)
         v_u = tr(hidden_states=z, timestep=t, encoder_hidden_states=negative_embeds, return_dict=False)[0]
-        return v_u + self.g * (v_c - v_u)
+        return (v_u + self.g * (v_c - v_u)).to(output_device)
 
     @torch.no_grad()
     def rollout(self, prompt_embeds, negative_embeds, latents, sigma_star: float) -> RolloutRecord:
