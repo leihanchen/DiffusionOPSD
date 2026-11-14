@@ -145,7 +145,13 @@ def manifest(path, round_index=0):
 def run(monkeypatch, m, run_dir, path=None, extra=()):
     argv = ['train', '--run-dir', str(run_dir)]
     if path:
-        argv += ['--curriculum-manifest', str(path), '--curriculum-round', '0']
+        dev = path.parent / 'development.json'
+        if not dev.exists():
+            record = PromptRecord('dev', 'dev', None, 'development', 'Independent rigid scene',
+                                  'dolly', {}, 'initial', 0)
+            dev.write_text(json.dumps([asdict(record)]))
+        argv += ['--curriculum-manifest', str(path), '--curriculum-round', '0',
+                 '--development-manifest', str(dev), '--development-count', '1']
     monkeypatch.setattr('sys.argv', argv + list(extra))
     m.main()
     return torch.load(run_dir / 'training_state.pt', weights_only=False)
@@ -207,3 +213,48 @@ def test_actual_round_transition_preserves_state(trainer, monkeypatch, tmp_path)
     assert new['extra']['thresholds'] == old['extra']['thresholds']
     assert set(old['extra']['references']) <= set(new['extra']['references'])
     assert new['optimizer']['state'][0]['step'] == 4
+
+
+def test_round_feedback_has_all_attempts_and_fixed_development(trainer, monkeypatch, tmp_path):
+    m, cfg = trainer
+    cfg.tau_id = 2.
+    path = tmp_path / 'train.json'
+    manifest(path)
+    run_dir = tmp_path / 'run'
+    state = run(monkeypatch, m, run_dir, path)
+    assert len(state['extra']['training_rows']) == 8
+    assert len(state['extra']['development_baseline']) == 2
+    assert len(state['extra']['development_rows']) == 2
+    costs = json.loads((run_dir / 'costs.json').read_text())
+    assert costs['training_clips'] == 8
+    assert costs['development_clips'] == 4
+    resumed = run(monkeypatch, m, run_dir, path, ['--resume'])
+    assert resumed['extra']['costs'] == state['extra']['costs']
+    dev_path = tmp_path / 'development.json'
+    dev = json.loads(dev_path.read_text())
+    dev[0]['text'] = 'Changed diagnostic prompt'
+    dev_path.write_text(json.dumps(dev))
+    with pytest.raises(ValueError, match='configuration'):
+        run(monkeypatch, m, run_dir, path, ['--resume'])
+
+
+def test_nonfinite_rejected_feedback_exports_as_unknown(trainer, monkeypatch, tmp_path):
+    m, cfg = trainer
+    cfg.tau_id = 2.
+
+    class MissingReward(torch.nn.Module):
+        def __init__(self, *args):
+            super().__init__()
+
+        def forward(self, x):
+            return SimpleNamespace(geo=torch.tensor([float('nan')]), s_id=torch.tensor([1.]),
+                                   motion=torch.tensor([1.]))
+
+    monkeypatch.setattr(m, 'GeoReward', MissingReward)
+    path = tmp_path / 'train.json'
+    manifest(path)
+    run_dir = tmp_path / 'run'
+    run(monkeypatch, m, run_dir, path)
+    report = json.loads((run_dir / 'round_feedback.json').read_text())
+    assert all(r['mean_geo'] is None for r in report['prompts'].values())
+    assert json.loads((run_dir / 'training_feedback.json').read_text())[0]['geo'] is None
