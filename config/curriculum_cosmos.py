@@ -16,6 +16,20 @@ def get_config() -> dict:
                 proposer_command=None, execution_profile=None)
 
 
+def get_runner_config() -> dict:
+    return dict(rounds=3, prompts_per_round=32, clips_per_prompt=4, seed=42,
+                development_count=8, development_seeds=2,
+                allocation=dict(retained=8, edited=12, rehearsal=4, new=8),
+                feedback_mode='numeric_only', curriculum_mode='adaptive',
+                initial_manifest=None, development_manifest=None, test_manifest=None,
+                training_config=None, trainer_command=None, proposer_command=None,
+                diagnosis_command=None, inventory_command=None, execution_profile=None,
+                environment={}, diagnosis_audit_path=None, phase_timeout_seconds=14400,
+                budget=dict(max_wall_seconds=43200, max_gpu_hours={'A100': 24},
+                            phase_estimate_seconds=dict(train_one_pass=3600, diagnose_clips=3600,
+                                                        prepare_next_manifest=600)))
+
+
 def execution_profile(name: str) -> dict:
     if name not in {'narval_gemma12', 'narval_parallel_arms', 'h200_gemma12_control', 'h200_qwen27_comparison'}:
         raise ValueError(f'Unknown execution profile: {name}')
