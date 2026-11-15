@@ -720,3 +720,10 @@ the frozen behavior adapter must remain selected throughout such comparisons.
 
 The implementation plan and validation ledger are in
 [`docs/superpowers/plans/2026-10-30-cosmos-nano-opsd.md`](docs/superpowers/plans/2026-10-30-cosmos-nano-opsd.md).
+
+# Native MiniMax-H3 video/audio OPSD
+
+See [the H3 training guide](docs/minimax_h3_training.md) for preparation, allocation-free
+preflight, P=2/R=1 and P=4/R=1 placement, Slurm launch, offline logging and exact
+resume. The proposed three-H100 pilot resources remain estimates pending full-model
+hardware qualification; the currently available Narval site has no H100 inventory.

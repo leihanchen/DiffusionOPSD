@@ -57,3 +57,6 @@ package-dir = {diffusionopsd = "src"}
 
 [tool.ruff]
 line-length = 120
+
+[tool.pytest.ini_options]
+markers = ["h3_gpu: explicit opt-in CUDA torchrun qualification (H3_RUN_GPU_TESTS=1)"]

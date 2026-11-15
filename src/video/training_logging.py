@@ -25,10 +25,13 @@ import torch
 
 
 @contextmanager
-def _preserve_rng():
+def _preserve_rng(owned_cuda_device=None):
     # SDK imports/initialization must not perturb the trainer's sampling streams.
     python_state, numpy_state, torch_state = random.getstate(), np.random.get_state(), torch.get_rng_state()
-    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
+    cuda_states = None
+    if torch.cuda.is_initialized():
+        cuda_states = (torch.cuda.get_rng_state_all() if owned_cuda_device is None
+                       else torch.cuda.get_rng_state(owned_cuda_device))
     try:
         yield
     finally:
@@ -36,7 +39,10 @@ def _preserve_rng():
         np.random.set_state(numpy_state)
         torch.set_rng_state(torch_state)
         if cuda_states is not None:
-            torch.cuda.set_rng_state_all(cuda_states)
+            if owned_cuda_device is None:
+                torch.cuda.set_rng_state_all(cuda_states)
+            else:
+                torch.cuda.set_rng_state(cuda_states, owned_cuda_device)
 
 
 def _atomic_json(path, value):
@@ -91,10 +97,11 @@ class VideoTrainingLogger:
     """
 
     def __init__(self, run_dir, config, backbone, *, purpose=None, rank=0, start_update=0,
-                 resume_checkpoint=None, experiment_group=None, wandb_module=None):
+                 resume_checkpoint=None, experiment_group=None, wandb_module=None, owned_cuda_device=None):
         self.root = Path(run_dir).resolve()
         self.config, self.backbone, self.rank = config, backbone, rank
         self.purpose = purpose
+        self.owned_cuda_device = owned_cuda_device
         self.start_update = int(start_update)
         self.last_update = self.start_update
         self.resume_checkpoint = Path(resume_checkpoint).resolve() if resume_checkpoint else None
@@ -150,7 +157,7 @@ class VideoTrainingLogger:
         }
         _atomic_json(self.manifest_path, self.metadata)
         try:
-            with _preserve_rng():
+            with _preserve_rng(self.owned_cuda_device):
                 if self.sdk is None:
                     import wandb
                     self.sdk = wandb
@@ -183,7 +190,7 @@ class VideoTrainingLogger:
         record = {**_scalar_record(data), "optimizer_updates": int(update), "event": event}
         self.last_update = int(update)
         media = []
-        with _preserve_rng():
+        with _preserve_rng(self.owned_cuda_device):
             payload = dict(record)
             for index, video in enumerate(videos):
                 path = Path(video["path"]).resolve()
@@ -195,6 +202,13 @@ class VideoTrainingLogger:
                     str(path), format="mp4", caption=f"{prompt} | seed={seed} | update={update}",
                 )
                 media.append({"path": str(path), "prompt": prompt, "seed": seed, "index": prompt_index})
+                if video.get('audio_path'):
+                    audio_path = Path(video['audio_path']).resolve()
+                    if not audio_path.is_file():
+                        raise FileNotFoundError(audio_path)
+                    payload[f"eval/prompt_{prompt_index}/audio"] = self.sdk.Audio(
+                        str(audio_path), caption=f"{prompt} | seed={seed} | update={update}")
+                    media[-1]['audio_path'] = str(audio_path)
             # Durable journal is an additional recovery source, not a claim of
             # transactional/exactly-once delivery into the SDK's asynchronous sink.
             with self.journal_path.open("a") as stream:
@@ -236,7 +250,7 @@ class VideoTrainingLogger:
         self._finished = True
         self.metadata.update(status=status, finished_at=time.time(), final_update=self.last_update)
         try:
-            with _preserve_rng():
+            with _preserve_rng(self.owned_cuda_device):
                 if self.run is not None:
                     self.run.summary.update({"training_status": status, "job_id": self.metadata["job_id"],
                                              "final_optimizer_updates": self.last_update})
