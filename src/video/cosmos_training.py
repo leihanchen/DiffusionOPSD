@@ -142,3 +142,54 @@ def load_training_state(path, *, config):
     random.setstate(rng["python"])
     np.random.set_state(rng["numpy"])
     return state
+
+
+@dataclass
+class RoundCursor:
+    """A shuffled permutation visited once, including entirely rejected batches."""
+
+    order: list[int]
+    next_index: int = 0
+
+    def __post_init__(self):
+        if (not self.order or any(type(i) is not int for i in self.order)
+                or sorted(self.order) != list(range(len(self.order)))
+                or type(self.next_index) is not int or not 0 <= self.next_index <= len(self.order)):
+            raise ValueError('Round cursor requires a permutation and a valid committed position')
+
+    @property
+    def cursor(self) -> int:
+        return self.next_index
+
+    def take(self) -> int | None:
+        if self.next_index == len(self.order):
+            return None
+        index = self.order[self.next_index]
+        self.next_index += 1
+        return index
+
+    def record_batch(self, retained: int) -> bool:
+        if retained < 0:
+            raise ValueError('Retained sample count must be nonnegative')
+        return retained > 0
+
+    def state_dict(self) -> dict:
+        return asdict(self)
+
+
+def validate_round_transition(state: dict, config: dict) -> None:
+    """Allow manifest replacement only after a committed complete previous round."""
+    old = state['config']
+    mutable = {'train_prompt_sha256', 'curriculum_manifest_hash', 'curriculum_round', 'curriculum_history_hash'}
+    def invariants(c):
+        return {k: v for k, v in c.items() if k not in mutable}
+    if invariants(old) != invariants(config):
+        raise ValueError('Round transition changes invariant training configuration')
+    if old.get('curriculum_round', -2) + 1 != config.get('curriculum_round'):
+        raise ValueError('Round transition must advance exactly one round')
+    cursor = state['extra'].get('round_cursor')
+    if cursor is None or cursor['next_index'] != len(cursor['order']):
+        raise ValueError('Previous round is not complete')
+
+    if state['extra'].get('development_done') is not True:
+        raise ValueError('Previous round development evaluation is not committed')
