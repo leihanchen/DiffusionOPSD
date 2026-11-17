@@ -8,6 +8,33 @@ import pytest
 from diffusionopsd.video.training_logging import VideoTrainingLogger
 
 
+def test_owned_cuda_rng_never_touches_other_devices(tmp_path, env, monkeypatch):
+    import torch
+    calls = []
+    monkeypatch.setattr(torch.cuda, 'is_initialized', lambda: True)
+    monkeypatch.setattr(torch.cuda, 'get_rng_state_all', lambda: pytest.fail('foreign CUDA RNG access'))
+    monkeypatch.setattr(torch.cuda, 'set_rng_state_all', lambda *args: pytest.fail('foreign CUDA RNG restore'))
+    monkeypatch.setattr(torch.cuda, 'get_rng_state', lambda device: calls.append(('get', device)) or b'state')
+    monkeypatch.setattr(torch.cuda, 'set_rng_state', lambda state, device: calls.append(('set', device)))
+    with VideoTrainingLogger(tmp_path, {}, 'minimax-h3', wandb_module=FakeWandb(),
+                             owned_cuda_device=torch.device('cuda:1')) as logger:
+        logger.log_train(1, {'loss': 1.})
+    assert calls
+    assert all(device == torch.device('cuda:1') for _, device in calls)
+
+
+def test_audio_is_logged_and_journaled_with_video(tmp_path, env):
+    video, audio = tmp_path/'clip.mp4', tmp_path/'clip.wav'
+    video.write_bytes(b'video')
+    audio.write_bytes(b'audio')
+    sdk = FakeWandb()
+    with VideoTrainingLogger(tmp_path, {}, 'minimax-h3', wandb_module=sdk) as logger:
+        logger.log_eval(1, {}, [dict(path=str(video), audio_path=str(audio), prompt='orbit', seed=42)])
+    assert sdk.run.records[-1]['eval/prompt_0/audio']['path'] == str(audio)
+    event = json.loads(logger.journal_path.read_text().splitlines()[-1])
+    assert event['videos'][0]['audio_path'] == str(audio)
+
+
 class FakeRun:
     def __init__(self):
         self.summary = {}
@@ -38,6 +65,9 @@ class FakeWandb:
         return self.run
 
     def Video(self, path, **kwargs):
+        return {"path": path, **kwargs}
+
+    def Audio(self, path, **kwargs):
         return {"path": path, **kwargs}
 
 
@@ -167,10 +197,14 @@ def test_all_video_training_entrypoints_use_shared_logger():
     assert len(scripts) >= 3
     for script in scripts:
         source = script.read_text()
+        if script.name == 'train_opsd_video_minimax_h3.py':
+            assert 'run_h3_training(cfg' in source
+            source = (root / 'src/video/h3_training.py').read_text()
         assert "VideoTrainingLogger" in source, script.name
         assert "wandb.init(" not in source, script.name
         assert "install_wandb_jsonl_tee" not in source, script.name
-        assert "with logger:" in source or "with VideoTrainingLogger(" in source, script.name
+        assert ("with logger:" in source or "with VideoTrainingLogger(" in source
+                or "phase('logger_start', logger.start)" in source), script.name
         assert "logger.log_record(" in source or ("logger.log_train(" in source and "logger.log_eval(" in source)
 
 

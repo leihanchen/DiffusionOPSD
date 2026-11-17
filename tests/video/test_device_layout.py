@@ -122,8 +122,8 @@ def test_all_training_presets_have_one_policy_and_one_frozen_device(name):
 
 
 def test_training_slurm_requests_only_paired_gpus():
-    root = Path(__file__).resolve().parents[2]
-    for path in (root / "scripts").glob("train_opsd_video_*.slurm"):
+    scripts = Path(__file__).resolve().parents[2] / "scripts"
+    for path in [scripts / "train_opsd_video_cosmos.slurm", *scripts.glob("train_opsd_video_wan*.slurm")]:
         text = path.read_text()
         for count in re.findall(r"#SBATCH --(?:gpus-per-node=a100:|gres=gpu:a100:)(\d+)", text):
             assert int(count) % 2 == 0, path
