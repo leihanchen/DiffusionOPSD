@@ -1,5 +1,6 @@
 """CPU integration with the real Cosmos model/pipeline, using random tiny weights."""
 
+from inspect import signature
 from types import SimpleNamespace
 
 import pytest
@@ -40,6 +41,8 @@ class TinyVideoVAE(torch.nn.Module):
 
 
 def test_real_cosmos_native_query_suffix_and_lora_gradients():
+    if "rope_axes_dim" not in signature(Cosmos3OmniTransformer.__init__).parameters:
+        pytest.skip("Native Cosmos test requires the Cosmos Diffusers overlay")
     torch.manual_seed(8)
     tokenizer = Tokenizer(models.WordLevel({"<unk>": 0, "<eos>": 1, "<|vision_start|>": 2}, unk_token="<unk>"))
     tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()

@@ -20,7 +20,7 @@ Use the dedicated H3 runtime, not the shared Cosmos overlay:
 export H3_SIF=/path/to/containers/diffusionopsd.sif
 export VIDEO_REWARD_CKPT_PATH=/shared/checkpoints
 bash scripts/setup_minimax_h3.sh
-bash scripts/run_minimax_h3_python.sh scripts/prepare_minimax_h3.py \
+HF_HUB_OFFLINE=0 bash scripts/run_minimax_h3_python.sh scripts/prepare_minimax_h3.py \
   --config config/minimax_h3_t2va.py --prefetch
 bash scripts/run_minimax_h3_python.sh scripts/prepare_minimax_h3.py \
   --config config/minimax_h3_t2va.py --cache-root /shared/checkpoints/minimax-h3-conditioning --condition
@@ -28,6 +28,14 @@ bash scripts/run_minimax_h3_python.sh scripts/prepare_minimax_h3.py \
   --config config/minimax_h3_t2va.py --check-only
 bash scripts/run_minimax_h3_python.sh scripts/train_opsd_video_minimax_h3.py \
   --config config/minimax_h3_t2va.py --preflight
+```
+
+Prefetch needs network access. Conditioning and preflight use the local assets.
+The base video test suite skips native H3 tests when the pinned runtime is
+absent. After the H3 runtime setup, run the native H3 CPU tests with:
+
+```bash
+bash scripts/run_minimax_h3_python.sh -m pytest -q tests/video/test_h3_*.py
 ```
 
 Preparation alone loads the text encoder. Preflight reads safetensors headers and
