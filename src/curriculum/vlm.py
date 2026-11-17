@@ -32,11 +32,13 @@ def validate_local_checkpoint(path: Path, model_id: str, revision: str) -> Path:
 
 def _proposal_payload(payload):
     if not isinstance(payload, dict) or set(payload) - {
-        'domain', 'round_index', 'split', 'count', 'sources', 'parents', 'feedback'
+        'domain', 'round_index', 'split', 'count', 'sources', 'parents', 'feedback', 'id_prefix'
     }:
         raise ValueError('Unsupported proposal fields')
     if payload.get('domain') != 'G1' or payload.get('split') not in {'train', 'development', 'test'}:
         raise ValueError('Only bounded G1 task generation is enabled')
+    if 'id_prefix' in payload and re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', payload['id_prefix']) is None:
+        raise ValueError('Invalid prompt ID prefix')
     count, index, sources = payload.get('count'), payload.get('round_index'), payload.get('sources')
     if type(count) is not int or not 1 <= count <= 4 or type(index) is not int or index < 0:
         raise ValueError('Proposal requests require 1..4 candidates and a nonnegative round')

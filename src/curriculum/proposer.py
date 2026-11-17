@@ -43,6 +43,8 @@ def validate_candidates(result, request: dict, history: list[PromptRecord]) -> l
     if Counter(r.parent_id for r in records if r.source == 'edited') != Counter(list(parents)):
         raise ValueError('Each allocated parent must produce exactly one controlled edit')
     for r in records:
+        if payload.get('id_prefix') and not r.prompt_id.startswith(payload['id_prefix']):
+            raise ValueError('Candidate ID must use the requested unique prefix')
         if r.split != payload['split'] or r.round_index != payload['round_index']:
             raise ValueError('Proposal changes requested split/round')
         if r.source == 'edited':
@@ -55,21 +57,27 @@ def validate_candidates(result, request: dict, history: list[PromptRecord]) -> l
     return records
 
 
-def _invoke(command: list[str], request_path: Path, response_path: Path, timeout: float) -> None:
+def _invoke(command: list[str], request_path: Path, response_path: Path, timeout: float,
+            lock_fds: tuple[int, ...] = ()) -> None:
     with (request_path.parent / (request_path.stem + '.stderr')).open('w') as errors:
         process = subprocess.Popen([*command, '--request', str(request_path), '--response', str(response_path)],
-                                   stdout=subprocess.DEVNULL, stderr=errors, start_new_session=True)
+                                   stdout=subprocess.DEVNULL, stderr=errors, start_new_session=True, pass_fds=lock_fds)
         try:
             returncode = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
             raise TimeoutError('Local VLM request timed out; process group terminated') from exc
+        except BaseException:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            raise
         if returncode and not (returncode == 2 and response_path.is_file()):
             raise RuntimeError(f'Local VLM worker exited with code {returncode}; see saved stderr')
 
 
-def propose(request: dict, command: list[str], output_dir: Path, timeout_seconds: int) -> list[PromptRecord]:
+def propose(request: dict, command: list[str], output_dir: Path, timeout_seconds: int,
+            *, lock_fds: tuple[int, ...] = ()) -> list[PromptRecord]:
     """At most three attempts. Interrupted in-flight calls require reconciliation.
 
     `history` is host-only and is never serialized to the VLM process. The visible
@@ -126,7 +134,7 @@ def propose(request: dict, command: list[str], output_dir: Path, timeout_seconds
             atomic_json(receipt_path, receipt)
             started = time.monotonic()
             try:
-                _invoke(command, request_path, response_path, timeout_seconds)
+                _invoke(command, request_path, response_path, timeout_seconds, lock_fds)
                 response = json.loads(response_path.read_text())
                 row['usage'] = response.get('usage', {})
                 row['worker_attempts'] = response.get('attempts', [])

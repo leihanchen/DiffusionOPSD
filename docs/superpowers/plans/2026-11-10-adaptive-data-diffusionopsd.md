@@ -273,20 +273,37 @@ fabricated. Semantic curriculum edits remain gated. Local evidence is in ignored
 
 ### Task 5: Durable orchestration, smoke, and minimal comparisons
 
+**Numeric-first implementation scope:** The current delivery implements the durable
+round loop with numerical allocation and Gemma text proposals. It provides optional
+visual-shadow and audit-approved combined modes for later validation. The existing
+12-clip AI comparison leaves semantic feedback unapproved. Full visual-driven
+comparisons, the 3 × 32 scientific pilot, H200 profiling, and the locked 16 × 2 final
+test are subsequent experiment runs. The immediate runtime gate is the bounded
+two-round Narval smoke below. See [runner usage](../../research/curriculum-runner-usage.md).
+
 **Files:** Create `src/curriculum/runner.py`, `scripts/run_curriculum.py`, `tests/curriculum/test_runner.py`, and a run-local readiness/results report.
 
 **Interfaces:** `run_experiment(config_path: Path, run_dir: Path) -> None`; phases are prepare_manifest, train_one_pass, evaluate_development, diagnose_clips, summarize, and prepare_next_manifest. Run diagnosis only after videos exist. Stop the diffusion process before launching the VLM phase; process all role requests sequentially with one VLM load where possible. Run state references immutable manifests and committed trainer checkpoints.
 
-- [ ] Write a two-round fixture test that interrupts each phase, resumes, and asserts identical manifests, prompt visit counts, and committed update counts. Add stale-hash and concurrent-writer tests.
-- [ ] Run tests to fail, then implement a single-writer lock, atomic state writes, subprocess commands, phase receipts, and cumulative cost reporting. Permit externally prepared manifests for offline training nodes.
-- [ ] Run all `tests/curriculum`, relevant Cosmos tests, and focused Ruff. Run the full video suite once the shared-change checks pass; disclose skipped integration dependencies.
-- [ ] Resolve and persist the selected execution profile and measured allocation inventory; test unresolved H200 topology, conflicting concurrent device ownership, and profile-hash mismatch on resume in `tests/curriculum/test_runner.py`. Refuse unresolved or changed placements during same-round resume; a hardware migration requires an explicit recorded transition and new smoke.
-- [ ] Validate cluster allocation and assets for each selected profile; run a two-round smoke with 2 prompts × 4 clips each round and 2 development prompts × 1 seed. Require at least one retained update per round; a fully rejected round is a failed smoke, not permission to lower gates. Verify task edits, adapter/EMA changes, logs, and checkpoint recovery.
+- [x] Write a two-round fixture test that interrupts each phase, resumes, and asserts identical manifests, prompt visit counts, and committed update counts. Add stale-hash and concurrent-writer tests.
+- [x] Run tests to fail, then implement a single-writer lock, atomic state writes, subprocess commands, phase receipts, and cumulative cost reporting. Permit externally prepared manifests for offline training nodes.
+- [x] Run all `tests/curriculum`, relevant Cosmos tests, and focused Ruff. Run the full video suite once the shared-change checks pass; disclose skipped integration dependencies.
+- [x] Resolve and persist the selected execution profile and measured allocation inventory; test unresolved H200 topology, conflicting concurrent device ownership, and profile-hash mismatch on resume in `tests/curriculum/test_runner.py`. Refuse unresolved or changed placements during same-round resume; a hardware migration requires an explicit recorded transition and new smoke.
+- [x] Validate the selected Narval allocation and assets; run a two-round smoke with 2 prompts × 4 clips each round and 2 development prompts × 1 seed. Require at least one retained update per round; a fully rejected round is a failed smoke, not permission to lower gates. Verify task edits, adapter/EMA changes, logs, and checkpoint recovery. Job 9387807 completed with two updates per round; checkpoint transfer was verified on GPU and fault recovery in automated tests. H200 profiles require separate runtime validation.
 - [ ] Measure reference/evaluation/training and both VLM-role throughput and peak memory, then record a per-profile pilot allocation cap and independent-run concurrency limit. Keep A100/H200 GPU-hours separate; compare Gemma across hardware before introducing the Qwen arm. Log visual-token and generated-token counts, selected frames, truncations, and schema-repair calls. Run three rounds of 32 prompts only if that measured budget fits.
 - [ ] Compare fixed synthetic prompts, VLM-diagnosis-driven mixed prompts, and numeric-only feedback, using the same initialization and resource accounting. Final test is 16 prompts × 2 seeds after selection is locked. This pilot establishes functionality, not all H1–H5 claims.
-- [ ] Commit `feat(curriculum): orchestrate resumable round-level prompt evolution` and record failures as well as gains.
+- [x] Commit `feat(curriculum): orchestrate resumable round-level prompt evolution` and record failures as well as gains.
 
 **Deliverable:** The smallest complete feedback-driven data/model loop.
+
+**Implementation evidence:** `tests/curriculum tests/video tests/test_opsd_v2.py`
+reports 427 passed, 10 skipped, 6 warnings; focused Ruff passes. The real Narval
+smoke completed in 20:52 and used 0.686 allocated A100 GPU-hours for the successful
+run. Both student and EMA changed each round, and Gemma produced one valid
+lineage-preserving edit without repair. The [usage report](../../research/curriculum-runner-usage.md)
+records setup failures, counters, memory, and limits. Unchecked throughput/H200
+profiling and scientific comparisons above remain subsequent experiment work
+under the numeric-first scope.
 
 ## Stage 4 — Optional target-aware research arm
 

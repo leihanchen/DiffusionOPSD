@@ -50,9 +50,14 @@ def summarize_round(rows: list[dict], development_rows: list[dict]) -> dict:
                 development={k: _summary(v) for k, v in development.items()})
 
 
-def allocate_next_round(prompt_ids: list[str], summary: dict, seed: int) -> dict:
+def allocate_next_round(prompt_ids: list[str], summary: dict, seed: int, quotas: dict | None = None) -> dict:
     if len(prompt_ids) != len(set(prompt_ids)):
         raise ValueError('Allocation requires unique prompt IDs')
+    quotas = quotas if quotas is not None else dict(retained=8, edited=12, rehearsal=4, new=8)
+    if (set(quotas) != {'retained', 'edited', 'rehearsal', 'new'}
+            or any(type(value) is not int or value < 0 for value in quotas.values())
+            or sum(quotas.values()) < 1):
+        raise ValueError('Allocation requires four nonnegative integer quotas')
     ids = list(prompt_ids)
     random.Random(seed).shuffle(ids)
     scores = summary['prompts']
@@ -62,14 +67,14 @@ def allocate_next_round(prompt_ids: list[str], summary: dict, seed: int) -> dict
         return (0, value) if _finite(value) else (1, 0)
 
     ids.sort(key=key)  # Stable sort preserves seeded tie breaking.
-    retained = ids[:8]
-    remaining = ids[8:]
+    retained = ids[:quotas['retained']]
+    remaining = ids[len(retained):]
     valid_high = [i for i in reversed(remaining) if _finite(scores.get(i, {}).get('mean_geo'))]
-    rehearsal = valid_high[:4]
-    edit_parents = [i for i in remaining if i not in rehearsal][:12]
-    shortfall = 24 - len(retained) - len(edit_parents) - len(rehearsal)
+    rehearsal = valid_high[:quotas['rehearsal']]
+    edit_parents = [i for i in remaining if i not in rehearsal][:quotas['edited']]
+    shortfall = sum(quotas.values()) - quotas['new'] - len(retained) - len(edit_parents) - len(rehearsal)
     return dict(retained=retained, edit_parents=edit_parents, rehearsal=rehearsal,
-                new_count=8 + shortfall, shortfall=shortfall)
+                new_count=quotas['new'] + shortfall, shortfall=shortfall)
 
 
 def development_contract(records, training_history, *, seed: int, seeds_per_prompt: int = 2,

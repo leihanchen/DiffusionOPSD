@@ -33,6 +33,7 @@ from peft import LoraConfig, get_peft_model_state_dict, set_peft_model_state_dic
 
 from diffusionopsd.curriculum.diagnosis import save_frame_evidence
 from diffusionopsd.curriculum.feedback import development_contract, summarize_round
+from diffusionopsd.curriculum.proposer import atomic_json
 from diffusionopsd.curriculum.records import manifest_hash, read_manifest, validate_manifest
 from diffusionopsd.stat_tracking import PerPromptStatTracker
 from diffusionopsd.video.training_data import load_training_data
@@ -134,6 +135,7 @@ def main():
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--curriculum-manifest", type=Path)
     parser.add_argument("--curriculum-history", type=Path, help="JSON history array for lineage validation")
+    parser.add_argument("--curriculum-execution-profile", type=Path)
     parser.add_argument("--curriculum-round", type=int)
     parser.add_argument("--previous-round-checkpoint", type=Path)
     parser.add_argument("--development-manifest", type=Path)
@@ -153,6 +155,14 @@ def main():
     if curriculum and not args.development_manifest:
         parser.error("Curriculum mode requires a separate frozen --development-manifest")
     cfg = read_config(args.config)
+    if args.curriculum_execution_profile:
+        profile = json.loads(args.curriculum_execution_profile.read_text())
+        devices = profile["train_device_map"]
+        expected = dict(policy_device=devices["policy"], inference_device=devices["vae"],
+                        vae_device=devices["vae"], reward_device=devices["reward"], judge_device=devices["judge"])
+        if (any(cfg[key] != f"cuda:{device}" for key, device in expected.items()) or cfg.clips_per_prompt != 4
+                or cfg.seed != profile["training_seed"]):
+            raise ValueError("Training config differs from declared curriculum placement or four-clip budget")
     data = None if curriculum else load_training_data(cfg, strip_files=False)
     configure_reward(cfg)
     validate_config(cfg)
@@ -312,6 +322,20 @@ def main():
                     "development_baseline": development_baseline, "development_done": development_done,
                     "development_contract": dev_contract},
             )
+            if curriculum:
+                with checkpoint_path.open("rb") as stream:
+                    digest = hashlib.sha256()
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+                atomic_json(run_dir / "round_state.json", dict(
+                    format_version=1, checkpoint_sha256=digest.hexdigest(),
+                    round_index=args.curriculum_round, manifest_hash=manifest_hash(prompt_records),
+                    next_index=prompt_cursor.cursor, prompt_count=len(train_prompts),
+                    completed_updates=completed, development_done=development_done,
+                    round_stats=round_stats, costs=costs,
+                    peak_memory_bytes={str(device): torch.cuda.max_memory_allocated(device)
+                                       for device in range(torch.cuda.device_count())}
+                    if torch.cuda.is_available() else {}))
             logger.log_event(completed, "checkpoint", {"path": str(checkpoint_path)})
             emit("checkpoint", update=completed, path=str(checkpoint_path))
 
@@ -565,6 +589,8 @@ def main():
                 if not development_done:
                     evaluate(completed)
                     development_done = True
+                    checkpoint()
+                else:
                     checkpoint()
                 # Rebuild exports from committed checkpoint-owned rows after interruption.
                 for filename, payload in (("training_feedback.json", training_rows),

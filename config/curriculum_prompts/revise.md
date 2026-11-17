@@ -9,3 +9,4 @@ Use only the supplied training parents and aggregate development feedback; never
 Return only a JSON array of PromptRecord objects: prompt_id, lineage_id, parent_id, split,
 text, subtype, attributes, source, round_index. Match the exact requested source counts.
 No markdown or commentary. Do not silently lower requirements or change task domains.
+When id_prefix is supplied, start every new prompt_id with that prefix and append a unique suffix.
