@@ -21,7 +21,7 @@ from diffusionopsd.video.cosmos_training import PromptCursor
 from diffusionopsd.video.gates import effective_weight, percentile_threshold
 from diffusionopsd.video.h3_auxiliary import H3PhaseProfiler, H3RewardClient, H3RewardService, H3Targets
 from diffusionopsd.video.h3_conditioning import (
-    load_conditioning, model_root, select_records, validate_h3_assets,
+    h3_geometry, load_conditioning, model_root, select_records, validate_h3_assets,
 )
 from diffusionopsd.video.h3_checkpoint import H3SafeBoundary
 from diffusionopsd.video.h3_fsdp import (
@@ -468,7 +468,7 @@ def _run_h3_training(cfg, *, run_dir, resume, boundary, verification=None):
         'reward_frames', 'reward_height', 'reward_width', 'train_pool_size', 'calibration_prompts', 'eval_count')
     signature = dict(identity=preflight['identity'], topology=preflight['topology'],
                      manifest_sha256=preflight['manifest_sha256'],
-                     geometry=manifest['geometry'],
+                     geometry=h3_geometry(cfg),
                      training={key: configuration[key] for key in training_keys if key in configuration})
     state = dict(update=0, signature=signature, prompt_cursor=cursor.state_dict(), tracker={},
                  baselines={}, training_references={}, calibration=None, experiment_group=None,

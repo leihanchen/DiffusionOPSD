@@ -421,6 +421,11 @@ def _load_encoder_components(cfg, device):
         text_encoder_layer=50, text_tag=MINIMAX_H3_TEXT_TAG, _execution_device=torch.device(device))
 
 
+def h3_geometry(cfg) -> dict:
+    """Return the generation geometry used by conditioning and checkpoints."""
+    return dict(num_frames=cfg.num_frames, height=cfg.height, width=cfg.width, fps=cfg.fps)
+
+
 def _modality_counts(cfg, text_tokens):
     from diffusers.modular_pipelines.minimax_h3.modular_pipeline import (
         video_latent_num_frames, audio_latent_num_frames,
@@ -456,7 +461,7 @@ def prepare_conditioning(cfg, *, device: str, cache_root: Path) -> Path:
         del components
     manifest = dict(identity=identity, records=records,
                     selections={name: [r['sample_id'] for r in rows] for name, rows in selected.items()},
-                    geometry=dict(num_frames=cfg.num_frames, height=cfg.height, width=cfg.width, fps=cfg.fps),
+                    geometry=h3_geometry(cfg),
                     longest_record=max(records, key=lambda key: records[key]['modality_tokens']['text']))
     path = Path(cache_root) / 'manifest.json'
     with _lock(path.with_suffix('.lock')):
@@ -471,10 +476,14 @@ def validate_h3_assets(cfg, cache_root: Path) -> dict:
     path = Path(cache_root) / 'manifest.json'
     if not path.is_file():
         raise FileNotFoundError(f'Missing conditioning manifest: {path}; run prepare_minimax_h3.py --condition')
+    manifest = json.loads(path.read_text())
+    geometry = h3_geometry(cfg)
+    if manifest.get('geometry') != geometry:
+        raise ValueError(f'Conditioning manifest geometry mismatch: cached {manifest.get("geometry")}, '
+                         f'configured {geometry}; run prepare_minimax_h3.py --condition for the new geometry')
     data = load_training_data(cfg, offline=True)
     selected = select_records(data, cfg)
     expected = _preparation_identity(cfg, data, selected, base_identity=asset_identity)
-    manifest = json.loads(path.read_text())
     if manifest['identity'] != expected:
         raise ValueError('Conditioning manifest identity mismatch')
     for name, rows in selected.items():

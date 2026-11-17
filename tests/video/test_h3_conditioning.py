@@ -204,6 +204,26 @@ def test_prepare_and_complete_preflight_without_model_allocations(tmp_path, monk
         h3.validate_h3_assets(cfg, tmp_path)
 
 
+def test_preflight_rejects_swapped_height_width_with_same_token_count(tmp_path, monkeypatch):
+    cfg = config()
+    cfg.train_pool_size, cfg.calibration_prompts, cfg.eval_count = 2, 1, 1
+    data = TrainingData(
+        [dict(sample_id='t0', text='first'), dict(sample_id='t1', text='second')],
+        [dict(sample_id='e0', text='evaluation')], {}, 't', 'e',
+    )
+    monkeypatch.setattr(h3, 'load_training_data', lambda *args, **kwargs: data)
+    monkeypatch.setattr(h3, '_asset_identity', lambda cfg: {'weight_inventory': {}})
+    monkeypatch.setattr(h3, '_load_encoder_components', lambda *args: components())
+    h3.prepare_conditioning(cfg, device='cpu', cache_root=tmp_path)
+    assert h3.validate_h3_assets(cfg, tmp_path)['records'] == 3
+
+    original_counts = h3._modality_counts(cfg, text_tokens=1)
+    cfg.height, cfg.width = cfg.width, cfg.height
+    assert h3._modality_counts(cfg, text_tokens=1) == original_counts
+    with pytest.raises(ValueError, match='Conditioning manifest geometry mismatch'):
+        h3.validate_h3_assets(cfg, tmp_path)
+
+
 def test_explicit_device_map_matches_torchrun_rank_order():
     cfg = config()
     cfg.policy_gpus = (1, 2)
