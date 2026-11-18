@@ -47,7 +47,7 @@ def trainer(monkeypatch, tmp_path):
 
     class Rollout:
         def __init__(self, pipe, *args, **kw):
-            self.policy = pipe.transformer
+            self.pipe = pipe
 
         def rollout(self, prompt, **kw):
             # Five video frames in [B,T,C,H,W].
@@ -58,7 +58,7 @@ def trainer(monkeypatch, tmp_path):
             return x
 
         def prediction(self, rec, transformer=None):
-            return rec.y0 + (transformer or self.policy).weights['default']
+            return rec.y0 + (transformer or self.pipe.transformer).weights['default']
 
     class Reward(torch.nn.Module):
         def __init__(self, *args):
@@ -311,3 +311,148 @@ def test_legacy_hf_dataset_keeps_identity_metadata(trainer, monkeypatch, tmp_pat
     assert state['config']['dataset_identity']['revision'] == 'a' * 40
     assert state['config']['train_prompt_sha256'] == 'train-content-hash'
     assert state['config']['eval_prompt_sha256'] == 'eval-content-hash'
+
+
+def enable_probes(monkeypatch, m, cfg):
+    import diffusionopsd.video.curriculum_probe as probes
+    cfg.paired_probe_count = 2
+    monkeypatch.setattr(probes, 'get_peft_model_state_dict', m.get_peft_model_state_dict)
+    monkeypatch.setattr(probes, 'set_peft_model_state_dict', m.set_peft_model_state_dict)
+    cls = m.CosmosRollout
+    original = cls.rollout
+    def rollout(self, *args, **kwargs):
+        rec = original(self, *args, **kwargs)
+        rec.sigma_q, rec.q_index = .5, 1
+        rec.timesteps = torch.arange(3)
+        rec.base = rec.y0.clone()
+        model = self.pipe.transformer
+        rec.y0 = rec.base + model.weights[model.active].detach().clone()
+        rec.x0 = rec.y0.clone()
+        return rec
+    monkeypatch.setattr(cls, 'rollout', rollout)
+    def prediction(self, rec, transformer=None):
+        model = transformer or self.pipe.transformer
+        return rec.base + model.weights[model.active]
+    monkeypatch.setattr(cls, 'prediction', prediction)
+    monkeypatch.setattr(cls, 'continue_from', lambda self, rec, y: y.clone(), raising=False)
+    # Mirror the production Diffusers adapter API at the heavyweight model boundary.
+    previous = m.InferenceReplica.__init__
+    def initialize(self, policy, **kwargs):
+        previous(self, policy, **kwargs)
+        self.model.get_active_adapters = lambda: [self.model.active]
+    monkeypatch.setattr(m.InferenceReplica, '__init__', initialize)
+
+
+def test_round_probes_capture_actual_targets_and_resume_without_repeating(trainer, monkeypatch, tmp_path):
+    m, cfg = trainer
+    enable_probes(monkeypatch, m, cfg)
+    path = tmp_path / 'train.json'
+    manifest(path)
+    full = run(monkeypatch, m, tmp_path / 'full', path)
+    report = json.loads((tmp_path / 'full/round_probe.json').read_text())
+    assert report['done'] and report['selected_count'] == report['audited_count'] == 2
+    assert all(q['baseline_parity']['passed'] for q in report['queries'])
+    assert all(q['final_gains']['g_plus'] > 0 for q in report['queries'])
+    # The native-consistent fixture fits .6 toward .66, closer to optimum1.
+    assert all(q['final_gains']['delta_round'] > 0 for q in report['queries'])
+    assert all(q['metadata']['original_behavior_update'] < full['update'] for q in report['queries'])
+    interrupted = run(monkeypatch, m, tmp_path / 'resumed', path, ['--max-updates-this-job', '1'])
+    assert not interrupted['extra']['round_probe']['done']
+    resumed = run(monkeypatch, m, tmp_path / 'resumed', path, ['--resume'])
+    again = run(monkeypatch, m, tmp_path / 'resumed', path, ['--resume'])
+    assert again['extra']['round_probe']['results'] == resumed['extra']['round_probe']['results']
+    assert full['extra']['round_probe']['results'] == resumed['extra']['round_probe']['results']
+    for name in ['default', 'old']:
+        assert torch.equal(full['adapters'][name]['w'], resumed['adapters'][name]['w'])
+
+
+def test_round_probes_record_missing_identity_rejected_queries(trainer, monkeypatch, tmp_path):
+    m, cfg = trainer
+    enable_probes(monkeypatch, m, cfg)
+    cfg.tau_id = 2.
+    path = tmp_path / 'train.json'
+    manifest(path)
+    run(monkeypatch, m, tmp_path / 'rejected', path)
+    report = json.loads((tmp_path / 'rejected/round_probe.json').read_text())
+    assert report['done'] and report['selected_count'] == 2 and report['audited_count'] == 0
+    assert len(report['missing_prompt_ids']) == 2
+
+
+def test_probe_resume_preserves_completed_query_after_diagnostic_failure(trainer, monkeypatch, tmp_path):
+    m, cfg = trainer
+    enable_probes(monkeypatch, m, cfg)
+    path = tmp_path / 'train.json'
+    manifest(path)
+    audit = m.audit_query
+    calls = []
+    def interrupted(entry, **kwargs):
+        calls.append(entry['metadata']['prompt_id'])
+        if len(calls) == 2:
+            raise RuntimeError('injected diagnostic failure')
+        return audit(entry, **kwargs)
+    monkeypatch.setattr(m, 'audit_query', interrupted)
+    with pytest.raises(RuntimeError, match='injected diagnostic'):
+        run(monkeypatch, m, tmp_path / 'run', path)
+    state = torch.load(tmp_path / 'run/training_state.pt', weights_only=False)
+    assert state['update'] == 2 and len(state['extra']['round_probe']['results']) == 1
+    first = state['extra']['round_probe']['results'][0]
+    monkeypatch.setattr(m, 'audit_query', audit)
+    resumed = run(monkeypatch, m, tmp_path / 'run', path, ['--resume'])
+    assert resumed['update'] == 2
+    assert len(resumed['extra']['round_probe']['results']) == 2
+    assert resumed['extra']['round_probe']['results'][0] == first
+
+
+def test_completed_round_can_recompute_probes_without_training_again(trainer, monkeypatch, tmp_path):
+    m, cfg = trainer
+    enable_probes(monkeypatch, m, cfg)
+    path = tmp_path / 'train.json'
+    manifest(path)
+    original = run(monkeypatch, m, tmp_path / 'run', path)
+    audit = m.audit_query
+    calls = []
+    def observed(entry, **kwargs):
+        calls.append(entry['metadata']['prompt_id'])
+        return audit(entry, **kwargs)
+    monkeypatch.setattr(m, 'audit_query', observed)
+    repeated = run(monkeypatch, m, tmp_path / 'run', path, ['--resume', '--recompute-probes'])
+    assert len(calls) == 2
+    assert repeated['update'] == original['update'] == 2
+    assert repeated['extra']['round_stats'] == original['extra']['round_stats']
+    assert repeated['extra']['round_probe']['results'] == original['extra']['round_probe']['results']
+    assert all(torch.equal(v, original['adapters']['default'][k]) for k,v in repeated['adapters']['default'].items())
+
+
+def test_recompute_probes_rejects_an_unfinished_training_round(trainer, monkeypatch, tmp_path):
+    m, cfg = trainer
+    enable_probes(monkeypatch, m, cfg)
+    path = tmp_path / 'train.json'
+    manifest(path)
+    run(monkeypatch, m, tmp_path / 'run', path, ['--max-updates-this-job', '1'])
+    with pytest.raises(ValueError, match='completed training'):
+        run(monkeypatch, m, tmp_path / 'run', path, ['--resume', '--recompute-probes'])
+
+
+def test_optional_probes_preserve_training_state_and_rng(trainer, monkeypatch, tmp_path):
+    """Extra diagnostic reward calls must leave training and its RNG intact."""
+    m, cfg = trainer
+    enable_probes(monkeypatch, m, cfg)
+    base_reward = m.GeoReward
+    class RandomConsumingReward(base_reward):
+        def forward(self, video):
+            torch.rand(())
+            return super().forward(video)
+    monkeypatch.setattr(m, 'GeoReward', RandomConsumingReward)
+    path = tmp_path / 'train.json'
+    manifest(path)
+    observed = run(monkeypatch, m, tmp_path / 'observed', path)
+    cfg.paired_probe_count = 0
+    plain = run(monkeypatch, m, tmp_path / 'plain', path)
+    assert observed['update'] == plain['update'] == 2
+    assert observed['extra']['round_stats'] == plain['extra']['round_stats']
+    for name in ['default', 'old']:
+        assert torch.equal(observed['adapters'][name]['w'], plain['adapters'][name]['w'])
+    assert torch.equal(observed['rng']['torch'], plain['rng']['torch'])
+    for param_id, state in observed['optimizer']['state'].items():
+        for key, value in state.items():
+            assert torch.equal(value, plain['optimizer']['state'][param_id][key])

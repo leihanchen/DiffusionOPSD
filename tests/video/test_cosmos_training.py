@@ -116,3 +116,30 @@ def test_checkpoint_roundtrip_rng_and_config_guard(tmp_path):
     assert torch.equal(torch.randn(3), expected_next_noise)
     with pytest.raises(ValueError, match="configuration"):
         load_training_state(path, config={"model": "different"})
+
+
+def test_target_observer_receives_actual_detached_targets_without_changing_update():
+    """Capturing diagnostic targets must not perturb fitting or expose live graphs."""
+    from types import SimpleNamespace
+    from diffusionopsd.video.cosmos_training import fit_queries
+    class Roll:
+        def __init__(self):
+            self.p = torch.nn.Parameter(torch.tensor(0.1))
+        def prediction(self, rec):
+            return rec.y0 + self.p
+    cfg = SimpleNamespace(rho=.1, n_ascent=2, eta=1., beta=1., loss_scale=1., max_grad_norm=1.)
+    rec = SimpleNamespace(y0=torch.full((1, 1, 2, 2), .5))
+    saved = []
+    def observe(record, positive, negative):
+        assert record is rec
+        assert not positive.requires_grad and not negative.requires_grad
+        saved.append((positive.clone(), negative.clone()))
+    a, b = Roll(), Roll()
+    def reward(y):
+        return y.flatten(1).mean(1)
+    fit_queries(a, [rec], [.5], reward, torch.optim.SGD([a.p], lr=.01), cfg)
+    fit_queries(b, [rec], [.5], reward, torch.optim.SGD([b.p], lr=.01), cfg, target_observer=observe)
+    assert torch.equal(a.p, b.p)
+    assert len(saved) == 1
+    assert torch.allclose(saved[0][0], torch.full_like(rec.y0, .55))
+    assert torch.allclose(saved[0][1], torch.full_like(rec.y0, .45))

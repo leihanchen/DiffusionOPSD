@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -52,7 +53,19 @@ def validate_cuda_devices(devices, *, visible_count):
     validate_two_gpu_layout(devices[0], devices[1:], visible_count=visible_count)
 
 
-def fit_queries(rollout, records, weights, reward_fn, optimizer, cfg, progress=None, policy=None):
+@contextmanager
+def preserve_rng():
+    """Keep optional diagnostic observations out of training RNG."""
+    python_rng, numpy_rng = random.getstate(), np.random.get_state()
+    try:
+        with torch.random.fork_rng():
+            yield
+    finally:
+        random.setstate(python_rng)
+        np.random.set_state(numpy_rng)
+
+
+def fit_queries(rollout, records, weights, reward_fn, optimizer, cfg, progress=None, policy=None, target_observer=None):
     """Fit detached reward targets at saved queries; never differentiate rollouts."""
     if not records or len(records) != len(weights):
         raise ValueError("queries and weights must be nonempty and have the same length")
@@ -82,6 +95,9 @@ def fit_queries(rollout, records, weights, reward_fn, optimizer, cfg, progress=N
         negative = opa_tr_step_nd(*args, direction=-1, first_grad=gradient)
         if not torch.isfinite(positive).all() or not torch.isfinite(negative).all():
             raise RuntimeError("Targets must be finite")
+        if target_observer is not None:
+            with preserve_rng():
+                target_observer(rec, positive, negative)
         report("policy_forward")
         prediction = rollout.prediction(rec) if policy is None else rollout.prediction(rec, transformer=policy)
         loss = branch_loss(prediction, y0, positive, negative, y0.new_tensor([weight]), cfg.beta).mean()
@@ -193,3 +209,6 @@ def validate_round_transition(state: dict, config: dict) -> None:
 
     if state['extra'].get('development_done') is not True:
         raise ValueError('Previous round development evaluation is not committed')
+
+    if old.get('paired_probe_count', 0) and not state['extra'].get('round_probe', {}).get('done'):
+        raise ValueError('Previous round paired probe evaluation is not committed')
