@@ -173,7 +173,9 @@ class CosmosRollout:
                 return scheduler.step(v.unsqueeze(0), t, z.unsqueeze(0), return_dict=False)[0].squeeze(0)
             return scheduler.step(v, t, z, return_dict=False)[0]
 
-        velocity = (record.z_q - forced_y) / record.sigma_q
+        # Anchor the delta to the captured native velocity. Reconstructing it
+        # from z_q and an unchanged y0 loses bits and can change the suffix.
+        velocity = record.v_old_q.float() + (record.y0 - forced_y) / record.sigma_q
         z = step(velocity, record.timesteps[q], record.z_q)
         for timestep in record.timesteps[q + 1 :]:
             velocity = self.velocity(record, latents=z, timestep=timestep)

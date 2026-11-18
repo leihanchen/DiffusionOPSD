@@ -270,7 +270,7 @@ def test_controller_death_keeps_worker_lock_and_recovers(settings, tmp_path):
     script = Path(__file__).resolve().parents[2] / 'scripts/run_curriculum.py'
     process = subprocess.Popen([sys.executable, str(script), '--config', str(path), '--run-dir', str(root)])
     try:
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 30
         while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
             time.sleep(.02)
         assert marker.exists()

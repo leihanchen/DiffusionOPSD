@@ -313,14 +313,18 @@ under the numeric-first scope.
 
 **Interfaces:** `score_candidates(record: object, candidates: dict[str, torch.Tensor], continue_fn: Callable, reward_fn: Callable) -> dict[str, float]`; `target_gains(scores: dict[str, float]) -> dict[str, float]`. Store a pre-round `default` adapter snapshot and each audited query's original `old` adapter snapshot. Query tensors may be serialized only in trusted run-local artifacts with explicit storage cost.
 
-- [ ] Write analytic tests for gain signs, nonfinite outcomes, baseline continuation parity, and a zero-change student with a nonzero student–behavior gap. Assert the measured before/after difference is zero in the last case.
-- [ ] Confirm test failure; implement no-grad candidate scoring with scheduler restoration and exception-safe adapter/RNG/mode restoration. Immutable original behavior weights are used for every candidate of one query.
-- [ ] Audit four deterministic query selections per round. Use that query's original sigma and state; evaluate the round-start and round-end student predictions through its original behavior continuation. Report `delta_round`, not isolated per-sample learning attribution. Include g_plus, g_minus, sample counts, and missingness.
-- [ ] Verify prefix/suffix parity and freeze-snapshot restoration in tiny Cosmos integration tests. Test an exception while the current EMA differs from the saved original snapshot.
-- [ ] Run focused tests and a budgeted GPU audit. Extend feedback with the measured vector; keep numeric-only feedback as a comparison. Do not derive semantic failure causes from gains.
-- [ ] Commit `feat(curriculum): audit paired target and round effects`.
+- [x] Write analytic tests for gain signs, nonfinite outcomes, baseline continuation parity, and a zero-change student with a nonzero student–behavior gap. Assert the measured before/after difference is zero in the last case.
+- [x] Confirm test failure; implement no-grad candidate scoring with scheduler restoration and exception-safe adapter/RNG/mode restoration. Immutable original behavior weights are used for every candidate of one query.
+- [x] Audit four deterministic query selections per round. Use that query's original sigma and state; evaluate the round-start and round-end student predictions through its original behavior continuation. Report `delta_round`, not isolated per-sample learning attribution. Include g_plus, g_minus, sample counts, and missingness.
+- [x] Verify prefix/suffix parity and freeze-snapshot restoration in tiny Cosmos integration tests. Test an exception while the current EMA differs from the saved original snapshot.
+- [x] Run focused tests and a budgeted GPU audit. Extend feedback with the measured vector; keep numeric-only feedback as a comparison. Do not derive semantic failure causes from gains.
+- [x] Commit `feat(curriculum): audit paired target and round effects`.
 
 **Deliverable:** A separately costed test of the proposal's diagnostic hypothesis. If it adds no predictive or training value, retain the simpler feedback loop.
+
+**Implementation and GPU evidence (November17):** Branch `codex/cosmos-step6-diagnostics`, commits `8ab451f`, `80668de`, `33a6f5b`. Full suite457passed/10skipped/14warnings. Jobs9653348 and9656720 exposed native-precision and velocity-roundtrip errors, fixed with regression tests. Final checkpoint replay9659456 completed all steps0:0 and reproduced original predictions and native endpoints exactly on3queries with4later model evaluations. Actual targets, original EMA and round-start student were restored from disk. Replay verification confirmed adapters, optimizer, RNG, update count and query snapshots unchanged. Positive targets improved final reward1/3(mean-0.001779); the student improved local reward3/3 but final reward0/3(mean-0.012185). One selected prompt was missing after identity rejection. Diagnostic results remain an optional sidecar, and prompt allocation continues using its existing numeric feedback. See [full measurements and runtime](../../research/2026-11-17-cosmos-step6-diagnostics.md).
+
+The stacked Step6 PR removes the separate calibration ablation and uses the existing calibration in its smoke preset. Historical GPU evidence uses the earlier balanced-calibration development configuration; the saved-query diagnostic implementation and native replay fix are retained. Post-trim CPU validation passed444tests with10skipped and12warnings; the PR records its full commands and results.
 
 ## Deferred research extensions
 

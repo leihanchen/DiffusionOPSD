@@ -36,13 +36,14 @@ from diffusionopsd.curriculum.feedback import development_contract, summarize_ro
 from diffusionopsd.curriculum.proposer import atomic_json
 from diffusionopsd.curriculum.records import manifest_hash, read_manifest, validate_manifest
 from diffusionopsd.stat_tracking import PerPromptStatTracker
+from diffusionopsd.video.curriculum_probe import adapter_snapshot, audit_query, query_to, select_probe_prompts
 from diffusionopsd.video.training_data import load_training_data
 from diffusionopsd.video.cosmos_quality import IsolatedVideoJudge
 from diffusionopsd.video.cosmos_rollout import CosmosRollout
 from diffusionopsd.video.device_layout import InferenceReplica
 from diffusionopsd.video.cosmos_training import (
     PromptCursor, RoundCursor, fit_queries, load_training_state, save_training_state, validate_cuda_devices,
-    validate_round_transition,
+    validate_round_transition, preserve_rng,
 )
 from diffusionopsd.video.estimators import load_depth_anything3, load_dinov2, load_waft
 from diffusionopsd.video.gates import effective_weight
@@ -91,6 +92,9 @@ def validate_config(cfg):
         raise ValueError("Invalid OPSD query or target settings")
     if not 0 <= cfg.ema_decay < 1 or cfg.learning_rate <= 0 or cfg.lora_rank < 1:
         raise ValueError("Invalid optimizer/EMA settings")
+    count = cfg.get("paired_probe_count", 0)
+    if type(count) is not int or count < 0:
+        raise ValueError("Paired probe count must be a nonnegative integer")
 
 
 def preflight(cfg):
@@ -132,6 +136,8 @@ def main():
     parser.add_argument("--config", default="config/cosmos_nano.py")
     parser.add_argument("--run-dir", default="logs/cosmos-nano")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--recompute-probes", action="store_true",
+                        help="Rescore saved queries from a resumed checkpoint")
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--curriculum-manifest", type=Path)
     parser.add_argument("--curriculum-history", type=Path, help="JSON history array for lineage validation")
@@ -143,6 +149,8 @@ def main():
     parser.add_argument("--development-seeds", type=int, default=2)
     parser.add_argument("--max-updates-this-job", type=int, default=0)
     args = parser.parse_args()
+    if args.recompute_probes and not args.resume:
+        parser.error("recompute-probes requires --resume")
     if args.max_updates_this_job < 0:
         parser.error("max-updates-this-job must be nonnegative")
     curriculum = args.curriculum_manifest is not None
@@ -155,6 +163,10 @@ def main():
     if curriculum and not args.development_manifest:
         parser.error("Curriculum mode requires a separate frozen --development-manifest")
     cfg = read_config(args.config)
+    if args.recompute_probes and not cfg.get("paired_probe_count", 0):
+        parser.error("recompute-probes requires enabled paired probes")
+    if cfg.get("paired_probe_count", 0) and not curriculum:
+        parser.error("Paired round probes require a curriculum manifest")
     if args.curriculum_execution_profile:
         profile = json.loads(args.curriculum_execution_profile.read_text())
         devices = profile["train_device_map"]
@@ -226,6 +238,11 @@ def main():
             validate_round_transition(metadata, signature)
         elif metadata["config"] != signature:
             raise ValueError("Checkpoint configuration differs from this run")
+        if args.recompute_probes:
+            cursor = metadata["extra"].get("round_cursor")
+            if (cursor is None or cursor["next_index"] != len(cursor["order"])
+                    or not metadata["extra"].get("development_done")):
+                raise ValueError("Probe recomputation requires a completed training round and development evaluation")
         resume_update = metadata["update"]
         logging_group = metadata["extra"].get("logging_experiment_group")
         del metadata
@@ -265,6 +282,7 @@ def main():
         ).eval().requires_grad_(False)
         tracker = PerPromptStatTracker(False)
         references, thresholds, completed = {}, {}, 0
+        probe_state = None
         cursor_state = None
         round_stats = {"attempted_clips": 0, "successful_updates": 0, "prompt_visits": 0}
         training_rows, development_rows, development_baseline = [], [], []
@@ -295,8 +313,24 @@ def main():
                 training_rows = state["extra"].get("training_rows", [])
                 development_rows = state["extra"].get("development_rows", [])
                 development_done = state["extra"].get("development_done", False)
+                probe_state = state["extra"].get("round_probe")
+                if cfg.get("paired_probe_count", 0) and probe_state is None:
+                    raise ValueError("Checkpoint is missing its paired probe snapshots")
                 if curriculum and cursor_state is None:
                     raise ValueError("Curriculum checkpoint is missing its committed round cursor")
+        if cfg.get("paired_probe_count", 0) and probe_state is None:
+            probe_state = dict(round_start=adapter_snapshot(policy, "default"),
+                               start_update=completed,
+                               selected_ids=select_probe_prompts(prompt_records, cfg.paired_probe_count,
+                                                                 cfg.seed + args.curriculum_round),
+                               queries=[], results=[], done=False, seconds=0.)
+        if args.recompute_probes:
+            namespace = f"probe_recompute_{time.time_ns()}"
+            atomic_json(run_dir / f"{namespace}_previous_results.json",
+                        dict(results=probe_state["results"], done=probe_state["done"],
+                             seconds=probe_state["seconds"]))
+            probe_state = {**probe_state, "results": [], "done": False, "seconds": 0.,
+                           "output_subdir": namespace}
         inference = InferenceReplica(policy, device="cpu")
         inference.select("default")
         pipe.transformer = inference.model
@@ -320,7 +354,8 @@ def main():
                     "round_stats": round_stats, "logging_experiment_group": logger.experiment_group,
                     "costs": costs, "training_rows": training_rows, "development_rows": development_rows,
                     "development_baseline": development_baseline, "development_done": development_done,
-                    "development_contract": dev_contract},
+                    "development_contract": dev_contract,
+                    **({"round_probe": probe_state} if probe_state is not None else {})},
             )
             if curriculum:
                 with checkpoint_path.open("rb") as stream:
@@ -332,6 +367,7 @@ def main():
                     round_index=args.curriculum_round, manifest_hash=manifest_hash(prompt_records),
                     next_index=prompt_cursor.cursor, prompt_count=len(train_prompts),
                     completed_updates=completed, development_done=development_done,
+                    **({"probe_done": probe_state["done"]} if probe_state is not None else {}),
                     round_stats=round_stats, costs=costs,
                     peak_memory_bytes={str(device): torch.cuda.max_memory_allocated(device)
                                        for device in range(torch.cuda.device_count())}
@@ -498,6 +534,7 @@ def main():
                 attempt_started = time.monotonic()
                 inference.select("old")
                 records, rewards, motions, quality_probs = [], [], [], []
+                retained_clip_indices = []
                 emit("sampling", update=completed+1, prompt=prompt, sampling_attempt=sampling_attempt)
                 with torch.no_grad():
                     for k in range(cfg.clips_per_prompt):
@@ -527,6 +564,7 @@ def main():
                             costs["training_clips"] += 1
                         if identity >= thresholds["identity"]:
                             records.append(rec)
+                            retained_clip_indices.append(k)
                             rewards.append(float(scored.geo))
                             motions.append(float(scored.motion))
                             quality_probs.append(p_quality)
@@ -556,8 +594,26 @@ def main():
                 logger.log_event(completed, "sampling", {**({"prompt_id": record_key} if curriculum else data.train[prompt_index]), "record_key": record_key, "generated": cfg.clips_per_prompt,
                                  "retained": len(records), "sampling_attempt": sampling_attempt})
                 emit("fitting", update=completed+1, retained=len(records))
+                def capture_target(rec, positive, negative):
+                    if (probe_state is None or record_key not in probe_state["selected_ids"]
+                            or rec is not records[0]):
+                        return
+                    probe_state["queries"].append(dict(
+                        record=query_to(rec, "cpu"), original_behavior=adapter_snapshot(policy, "old"),
+                        targets={"positive": positive.detach().cpu().clone(),
+                                 "negative": negative.detach().cpu().clone()},
+                        effective_weight=weights[0],
+                        metadata=dict(prompt_id=record_key, prompt=prompt, subtype=prompt_records[prompt_index].subtype,
+                                      round_index=args.curriculum_round, original_behavior_update=completed,
+                                      round_start_update=probe_state["start_update"],
+                                      seed=cfg.seed + (sampling_attempt+1)*100 + retained_clip_indices[0],
+                                      clip_index=retained_clip_indices[0], sigma_q=rec.sigma_q, q_index=rec.q_index,
+                                      requested_sigma=cfg.query_sigma,
+                                      remaining_model_steps=len(rec.timesteps)-rec.q_index-1)))
+
                 with context, torch.autocast("cuda", dtype=torch.bfloat16):
-                    metrics = fit_queries(roll, records, weights, local_reward, optimizer, cfg, progress=fitting_progress, policy=policy)
+                    metrics = fit_queries(roll, records, weights, local_reward, optimizer, cfg, progress=fitting_progress, policy=policy,
+                        target_observer=capture_target if probe_state is not None else None)
                 changed = any(not torch.equal(before[k], v) for k, v in get_peft_model_state_dict(policy).items())
                 if not changed:
                     raise RuntimeError("Optimizer did not change any policy adapter weights")
@@ -591,6 +647,48 @@ def main():
                     development_done = True
                     checkpoint()
                 else:
+                    checkpoint()
+                if probe_state is not None:
+                    round_end = adapter_snapshot(policy, "default")
+                    for index in range(len(probe_state["results"]), len(probe_state["queries"])):
+                        entry = probe_state["queries"][index]
+                        videos, candidate_metrics = [], {}
+
+                        def observe_endpoint(name, endpoint):
+                            clip = decode(endpoint)
+                            scored = geometry(clip)
+                            candidate_metrics[name] = dict(geo=observed_number(scored.geo),
+                                                           identity=observed_number(scored.s_id),
+                                                           motion=observed_number(scored.motion))
+                            if cfg.save_videos:
+                                path = run_dir / probe_state.get("output_subdir", "probe") / f"query_{index}_{name}.mp4"
+                                path.parent.mkdir(parents=True, exist_ok=True)
+                                save_video(clip[0], path, cfg.fps)
+                                videos.append(dict(path=str(path), prompt=f"{name}: {entry['metadata']['prompt']}",
+                                                   seed=entry["metadata"]["seed"], index=f"probe_{index}_{name}"))
+
+                        started = time.monotonic()
+                        emit("probe_start", query=index, **entry["metadata"])
+                        with preserve_rng():
+                            result = audit_query(entry, rollout=roll, inference=inference,
+                                                 round_start=probe_state["round_start"], round_end=round_end,
+                                                 reward_fn=local_reward, device=cfg.inference_device,
+                                                 on_endpoint=observe_endpoint)
+                        result.update(candidate_metrics=candidate_metrics, round_end_update=completed,
+                                      videos={v["index"].split(f"probe_{index}_", 1)[1]: v["path"] for v in videos})
+                        probe_state["seconds"] += time.monotonic() - started
+                        probe_state["results"].append(result)
+                        logger.log_eval(completed, {f"probe/{index}/{key}": value
+                                                   for key, value in result["final_gains"].items()}, videos)
+                        emit("probe_result", query=index, **result)
+                        checkpoint()
+                    probe_state["done"] = True
+                    audited = {q["metadata"]["prompt_id"] for q in probe_state["queries"]}
+                    atomic_json(run_dir / "round_probe.json", dict(
+                        done=True, selected_count=len(probe_state["selected_ids"]),
+                        selected_prompt_ids=probe_state["selected_ids"], audited_count=len(probe_state["results"]),
+                        missing_prompt_ids=[key for key in probe_state["selected_ids"] if key not in audited],
+                        seconds=probe_state["seconds"], queries=probe_state["results"]))
                     checkpoint()
                 # Rebuild exports from committed checkpoint-owned rows after interruption.
                 for filename, payload in (("training_feedback.json", training_rows),

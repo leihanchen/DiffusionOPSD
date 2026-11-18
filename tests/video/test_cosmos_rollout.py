@@ -122,3 +122,19 @@ def test_decode_keeps_latent_gradient_and_normalization():
 def test_invalid_query_rejected(sigma):
     with pytest.raises(ValueError, match="sigma"):
         CosmosRollout(TinyPipeline(), 8, 1.0).rollout("prompt", sigma_star=sigma)
+
+
+def test_unchanged_prediction_uses_captured_velocity_without_roundtrip_error():
+    """The no-op continuation must preserve the actual native solver input."""
+    class VelocityScheduler:
+        def step(self, v, t, z, return_dict=False):
+            return (v,)
+    z = torch.full((1, 1, 1, 1, 1), 10000.)
+    velocity = torch.full_like(z, .123456789)
+    rec = SimpleNamespace(z_q=z, v_old_q=velocity, sigma_q=.626635,
+                          q_index=0, timesteps=torch.tensor([1.]),
+                          scheduler=VelocityScheduler(), solver_outer_axis=False)
+    unchanged = z - rec.sigma_q * velocity
+    rec.y0 = unchanged
+    result = CosmosRollout(TinyPipeline(), 8, 1.).continue_from(rec, unchanged)
+    assert torch.equal(result, velocity)

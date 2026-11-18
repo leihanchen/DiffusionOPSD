@@ -75,3 +75,13 @@ def test_transition_rejects_training_complete_but_development_uncommitted():
                                      'development_done': False}}
     with pytest.raises(ValueError, match='development'):
         validate_round_transition(state, old | {'curriculum_round': 1})
+
+
+def test_round_transition_requires_enabled_probe_completion():
+    old = {'curriculum_round': 0, 'paired_probe_count': 4}
+    state = {'config': old, 'extra': {'round_cursor': {'order': [0], 'next_index': 1},
+                                     'development_done': True, 'round_probe': {'done': False}}}
+    with pytest.raises(ValueError, match='probe'):
+        validate_round_transition(state, old | {'curriculum_round': 1})
+    state['extra']['round_probe']['done'] = True
+    validate_round_transition(state, old | {'curriculum_round': 1})
